@@ -1,0 +1,15 @@
+{
+  "name": "stanley-business-manager-desktop",
+  "version": "1.0.0",
+  "description": "Standalone Windows desktop runtime for STANLEY BUSINESS MANAGER",
+  "main": "main.cjs",
+  "author": "Stanley Print & Branding Studio",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.1.8"
+  }
+}

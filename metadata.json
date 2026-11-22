@@ -1,0 +1,6 @@
+{
+  "name": "STANLEY BUSINESS MANAGER",
+  "description": "Complete business management platform for printing, graphics, branding, and advertising operations in Uganda.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

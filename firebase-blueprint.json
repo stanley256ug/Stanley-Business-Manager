@@ -1,0 +1,209 @@
+{
+  "entities": {
+    "WorkspaceSettings": {
+      "title": "WorkspaceSettings",
+      "description": "Business settings, receipt configuration, and ownership metadata for a Stanley Business Manager workspace.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "business_name": { "type": "string", "minLength": 1, "maxLength": 150 },
+        "tagline": { "type": "string", "maxLength": 200 },
+        "logo_url": { "type": "string", "maxLength": 500000 },
+        "phone_primary": { "type": "string", "maxLength": 40 },
+        "phone_secondary": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 120 },
+        "location": { "type": "string", "maxLength": 160 },
+        "currency": { "type": "string", "enum": ["UGX", "USD", "KES", "TZS"] },
+        "default_payment_method": { "type": "string", "enum": ["Cash", "Mobile Money", "Bank Transfer", "Other"] },
+        "receipt_template": { "type": "string", "enum": ["executive", "classic", "compact"] },
+        "receipt_thank_you": { "type": "string", "maxLength": 400 },
+        "receipt_prefix": { "type": "string", "minLength": 1, "maxLength": 10 },
+        "next_receipt_seq": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "business_name", "currency", "receipt_prefix", "next_receipt_seq", "createdAt", "updatedAt"]
+    },
+    "Product": {
+      "title": "Product",
+      "description": "Printing, graphics, branding, and photography product/service catalog item.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "clientSyncId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "category": {
+          "type": "string",
+          "enum": [
+            "Business Cards",
+            "Business Stickers",
+            "Tear Drop Banners",
+            "Promotional Banners",
+            "Posters & Flyers",
+            "Graphic Design",
+            "Photography",
+            "Other Printing & Branding"
+          ]
+        },
+        "description": { "type": "string", "maxLength": 400 },
+        "unit_price": { "type": "number" },
+        "production_cost": { "type": "number" },
+        "unit_label": { "type": "string", "maxLength": 40 },
+        "is_active": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "clientSyncId", "name", "category", "unit_price", "production_cost", "is_active", "createdAt", "updatedAt"]
+    },
+    "Customer": {
+      "title": "Customer",
+      "description": "Registered customer contact and notes.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "clientSyncId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 120 },
+        "location": { "type": "string", "maxLength": 160 },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "clientSyncId", "name", "createdAt", "updatedAt"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Production job order with status tracking and delivery instructions.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "clientSyncId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "order_number": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "customer_name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "customer_phone": { "type": "string", "maxLength": 40 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "items_summary": { "type": "string", "maxLength": 500 },
+        "quantity": { "type": "number" },
+        "total_amount": { "type": "number" },
+        "deposit_paid": { "type": "number" },
+        "status": {
+          "type": "string",
+          "enum": [
+            "New Order",
+            "Awaiting Deposit",
+            "In Production",
+            "Ready for Collection",
+            "Delivered",
+            "Completed",
+            "Cancelled"
+          ]
+        },
+        "deadline": { "type": "string", "maxLength": 30 },
+        "delivery_details": { "type": "string", "maxLength": 300 },
+        "instructions": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "clientSyncId", "order_number", "customer_name", "title", "quantity", "total_amount", "deposit_paid", "status", "createdAt", "updatedAt"]
+    },
+    "Sale": {
+      "title": "Sale",
+      "description": "Recorded sale and electronic receipt with line items and payment balances.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "clientSyncId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "receipt_number": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "customer_name": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "customer_phone": { "type": "string", "maxLength": 40 },
+        "items": { "type": "array" },
+        "subtotal": { "type": "number" },
+        "discount": { "type": "number" },
+        "total_amount": { "type": "number" },
+        "amount_paid": { "type": "number" },
+        "balance_due": { "type": "number" },
+        "payment_method": { "type": "string", "enum": ["Cash", "Mobile Money", "Bank Transfer", "Other"] },
+        "payment_status": { "type": "string", "enum": ["Paid", "Partially Paid", "Unpaid"] },
+        "notes": { "type": "string", "maxLength": 500 },
+        "sale_date": { "type": "string", "minLength": 8, "maxLength": 30 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerId",
+        "clientSyncId",
+        "receipt_number",
+        "customer_name",
+        "items",
+        "subtotal",
+        "discount",
+        "total_amount",
+        "amount_paid",
+        "balance_due",
+        "payment_method",
+        "payment_status",
+        "sale_date",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "Business expenditure entry for materials, rent, utilities, salaries, and operations.",
+      "type": "object",
+      "properties": {
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "clientSyncId": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "category": {
+          "type": "string",
+          "enum": [
+            "Materials & Printing Costs",
+            "Transport",
+            "Electricity",
+            "Rent",
+            "Equipment Purchases",
+            "Internet & Subscriptions",
+            "Salaries & Wages",
+            "Other Business Expenses"
+          ]
+        },
+        "amount": { "type": "number" },
+        "payment_method": { "type": "string", "enum": ["Cash", "Mobile Money", "Bank Transfer", "Other"] },
+        "vendor": { "type": "string", "maxLength": 160 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "expense_date": { "type": "string", "minLength": 8, "maxLength": 30 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerId", "clientSyncId", "title", "category", "amount", "payment_method", "expense_date", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/workspaces/{workspaceId}": {
+      "schema": { "$ref": "#/entities/WorkspaceSettings" },
+      "description": "Business workspace root document owned by the authenticated user."
+    },
+    "/workspaces/{workspaceId}/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Products and services catalog synced for the workspace."
+    },
+    "/workspaces/{workspaceId}/customers/{customerId}": {
+      "schema": { "$ref": "#/entities/Customer" },
+      "description": "Customer directory records synced for the workspace."
+    },
+    "/workspaces/{workspaceId}/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Production orders synced for the workspace."
+    },
+    "/workspaces/{workspaceId}/sales/{saleId}": {
+      "schema": { "$ref": "#/entities/Sale" },
+      "description": "Sales and electronic receipts synced for the workspace."
+    },
+    "/workspaces/{workspaceId}/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "Business expenditure records synced for the workspace."
+    }
+  }
+}

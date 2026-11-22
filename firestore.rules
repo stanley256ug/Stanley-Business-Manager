@@ -1,0 +1,305 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isWorkspaceOwner(workspaceId) {
+      return isVerifiedUser() &&
+        isValidId(workspaceId) &&
+        get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == request.auth.uid;
+    }
+
+    function isValidPaymentMethod(val) {
+      return val is string && val in ['Cash', 'Mobile Money', 'Bank Transfer', 'Other'];
+    }
+
+    function isValidWorkspace(data, workspaceId) {
+      return data.keys().hasAll([
+          'ownerId', 'business_name', 'currency', 'receipt_prefix', 'next_receipt_seq', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'business_name', 'tagline', 'logo_url', 'phone_primary', 'phone_secondary',
+          'email', 'location', 'currency', 'default_payment_method', 'receipt_template',
+          'receipt_thank_you', 'receipt_prefix', 'next_receipt_seq', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId == request.auth.uid && data.ownerId == workspaceId &&
+        data.business_name is string && data.business_name.size() >= 1 && data.business_name.size() <= 150 &&
+        (!('tagline' in data) || (data.tagline is string && data.tagline.size() <= 200)) &&
+        (!('logo_url' in data) || (data.logo_url is string && data.logo_url.size() <= 500000)) &&
+        (!('phone_primary' in data) || (data.phone_primary is string && data.phone_primary.size() <= 40)) &&
+        (!('phone_secondary' in data) || (data.phone_secondary is string && data.phone_secondary.size() <= 40)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+        (!('location' in data) || (data.location is string && data.location.size() <= 160)) &&
+        data.currency is string && data.currency in ['UGX', 'USD', 'KES', 'TZS'] &&
+        (!('default_payment_method' in data) || isValidPaymentMethod(data.default_payment_method)) &&
+        (!('receipt_template' in data) || (data.receipt_template is string && data.receipt_template in ['executive', 'classic', 'compact'])) &&
+        (!('receipt_thank_you' in data) || (data.receipt_thank_you is string && data.receipt_thank_you.size() <= 400)) &&
+        data.receipt_prefix is string && data.receipt_prefix.size() >= 1 && data.receipt_prefix.size() <= 10 &&
+        data.next_receipt_seq is number && data.next_receipt_seq >= 1 &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasAll([
+          'ownerId', 'clientSyncId', 'name', 'category', 'unit_price', 'production_cost', 'is_active', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'clientSyncId', 'name', 'category', 'description', 'unit_price', 'production_cost', 'unit_label', 'is_active', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId == request.auth.uid &&
+        isValidId(data.clientSyncId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
+        data.category is string && data.category in [
+          'Business Cards', 'Business Stickers', 'Tear Drop Banners', 'Promotional Banners',
+          'Posters & Flyers', 'Graphic Design', 'Photography', 'Other Printing & Branding'
+        ] &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 400)) &&
+        data.unit_price is number && data.unit_price >= 0 &&
+        data.production_cost is number && data.production_cost >= 0 &&
+        (!('unit_label' in data) || (data.unit_label is string && data.unit_label.size() <= 40)) &&
+        data.is_active is bool &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidCustomer(data) {
+      return data.keys().hasAll(['ownerId', 'clientSyncId', 'name', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerId', 'clientSyncId', 'name', 'phone', 'email', 'location', 'notes', 'createdAt', 'updatedAt']) &&
+        data.ownerId is string && data.ownerId == request.auth.uid &&
+        isValidId(data.clientSyncId) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 160 &&
+        (!('phone' in data) || (data.phone is string && data.phone.size() <= 40)) &&
+        (!('email' in data) || (data.email is string && data.email.size() <= 120)) &&
+        (!('location' in data) || (data.location is string && data.location.size() <= 160)) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000)) &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidOrder(data) {
+      return data.keys().hasAll([
+          'ownerId', 'clientSyncId', 'order_number', 'customer_name', 'title', 'quantity',
+          'total_amount', 'deposit_paid', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'clientSyncId', 'order_number', 'customer_name', 'customer_phone', 'title',
+          'items_summary', 'quantity', 'total_amount', 'deposit_paid', 'status', 'deadline',
+          'delivery_details', 'instructions', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId == request.auth.uid &&
+        isValidId(data.clientSyncId) &&
+        data.order_number is string && data.order_number.size() >= 1 && data.order_number.size() <= 40 &&
+        data.customer_name is string && data.customer_name.size() >= 1 && data.customer_name.size() <= 160 &&
+        (!('customer_phone' in data) || (data.customer_phone is string && data.customer_phone.size() <= 40)) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        (!('items_summary' in data) || (data.items_summary is string && data.items_summary.size() <= 500)) &&
+        data.quantity is number && data.quantity >= 1 &&
+        data.total_amount is number && data.total_amount >= 0 &&
+        data.deposit_paid is number && data.deposit_paid >= 0 &&
+        data.status is string && data.status in [
+          'New Order', 'Awaiting Deposit', 'In Production', 'Ready for Collection', 'Delivered', 'Completed', 'Cancelled'
+        ] &&
+        (!('deadline' in data) || (data.deadline is string && data.deadline.size() <= 30)) &&
+        (!('delivery_details' in data) || (data.delivery_details is string && data.delivery_details.size() <= 300)) &&
+        (!('instructions' in data) || (data.instructions is string && data.instructions.size() <= 1000)) &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidSale(data) {
+      return data.keys().hasAll([
+          'ownerId', 'clientSyncId', 'receipt_number', 'customer_name', 'items', 'subtotal',
+          'discount', 'total_amount', 'amount_paid', 'balance_due', 'payment_method',
+          'payment_status', 'sale_date', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'clientSyncId', 'receipt_number', 'customer_name', 'customer_phone', 'items',
+          'subtotal', 'discount', 'total_amount', 'amount_paid', 'balance_due', 'payment_method',
+          'payment_status', 'notes', 'sale_date', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId == request.auth.uid &&
+        isValidId(data.clientSyncId) &&
+        data.receipt_number is string && data.receipt_number.size() >= 1 && data.receipt_number.size() <= 40 &&
+        data.customer_name is string && data.customer_name.size() >= 1 && data.customer_name.size() <= 160 &&
+        (!('customer_phone' in data) || (data.customer_phone is string && data.customer_phone.size() <= 40)) &&
+        data.items is list && data.items.size() >= 1 && data.items.size() <= 50 && data.items[0] is map &&
+        data.subtotal is number && data.subtotal >= 0 &&
+        data.discount is number && data.discount >= 0 &&
+        data.total_amount is number && data.total_amount >= 0 &&
+        data.amount_paid is number && data.amount_paid >= 0 &&
+        data.balance_due is number && data.balance_due >= 0 &&
+        isValidPaymentMethod(data.payment_method) &&
+        data.payment_status is string && data.payment_status in ['Paid', 'Partially Paid', 'Unpaid'] &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        data.sale_date is string && data.sale_date.size() >= 8 && data.sale_date.size() <= 30 &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    function isValidExpense(data) {
+      return data.keys().hasAll([
+          'ownerId', 'clientSyncId', 'title', 'category', 'amount', 'payment_method', 'expense_date', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ownerId', 'clientSyncId', 'title', 'category', 'amount', 'payment_method', 'vendor', 'notes', 'expense_date', 'createdAt', 'updatedAt'
+        ]) &&
+        data.ownerId is string && data.ownerId == request.auth.uid &&
+        isValidId(data.clientSyncId) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 200 &&
+        data.category is string && data.category in [
+          'Materials & Printing Costs', 'Transport', 'Electricity', 'Rent',
+          'Equipment Purchases', 'Internet & Subscriptions', 'Salaries & Wages', 'Other Business Expenses'
+        ] &&
+        data.amount is number && data.amount >= 0 &&
+        isValidPaymentMethod(data.payment_method) &&
+        (!('vendor' in data) || (data.vendor is string && data.vendor.size() <= 160)) &&
+        (!('notes' in data) || (data.notes is string && data.notes.size() <= 500)) &&
+        data.expense_date is string && data.expense_date.size() >= 8 && data.expense_date.size() <= 30 &&
+        data.createdAt is timestamp && data.updatedAt is timestamp;
+    }
+
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    match /workspaces/{workspaceId} {
+      allow get: if isVerifiedUser() && isValidId(workspaceId) && existing().ownerId == request.auth.uid;
+      allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+      allow create: if isVerifiedUser() && isValidId(workspaceId) &&
+        isValidWorkspace(incoming(), workspaceId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() && isValidId(workspaceId) &&
+        existing().ownerId == request.auth.uid &&
+        isValidWorkspace(incoming(), workspaceId) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'business_name', 'tagline', 'logo_url', 'phone_primary', 'phone_secondary',
+          'email', 'location', 'currency', 'default_payment_method', 'receipt_template',
+          'receipt_thank_you', 'receipt_prefix', 'next_receipt_seq', 'updatedAt'
+        ]);
+      allow delete: if false;
+
+      match /products/{productId} {
+        allow get: if isWorkspaceOwner(workspaceId) && isValidId(productId);
+        allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+        allow create: if isWorkspaceOwner(workspaceId) && isValidId(productId) &&
+          isValidProduct(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isWorkspaceOwner(workspaceId) && isValidId(productId) &&
+          isValidProduct(incoming()) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().clientSyncId == existing().clientSyncId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'category', 'description', 'unit_price', 'production_cost', 'unit_label', 'is_active', 'updatedAt'
+          ]);
+        allow delete: if isWorkspaceOwner(workspaceId) && isValidId(productId);
+      }
+
+      match /customers/{customerId} {
+        allow get: if isWorkspaceOwner(workspaceId) && isValidId(customerId);
+        allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+        allow create: if isWorkspaceOwner(workspaceId) && isValidId(customerId) &&
+          isValidCustomer(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isWorkspaceOwner(workspaceId) && isValidId(customerId) &&
+          isValidCustomer(incoming()) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().clientSyncId == existing().clientSyncId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'name', 'phone', 'email', 'location', 'notes', 'updatedAt'
+          ]);
+        allow delete: if isWorkspaceOwner(workspaceId) && isValidId(customerId);
+      }
+
+      match /orders/{orderId} {
+        allow get: if isWorkspaceOwner(workspaceId) && isValidId(orderId);
+        allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+        allow create: if isWorkspaceOwner(workspaceId) && isValidId(orderId) &&
+          isValidOrder(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isWorkspaceOwner(workspaceId) && isValidId(orderId) &&
+          isValidOrder(incoming()) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().clientSyncId == existing().clientSyncId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'order_number', 'customer_name', 'customer_phone', 'title', 'items_summary',
+            'quantity', 'total_amount', 'deposit_paid', 'status', 'deadline',
+            'delivery_details', 'instructions', 'updatedAt'
+          ]);
+        allow delete: if isWorkspaceOwner(workspaceId) && isValidId(orderId);
+      }
+
+      match /sales/{saleId} {
+        allow get: if isWorkspaceOwner(workspaceId) && isValidId(saleId);
+        allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+        allow create: if isWorkspaceOwner(workspaceId) && isValidId(saleId) &&
+          isValidSale(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isWorkspaceOwner(workspaceId) && isValidId(saleId) &&
+          isValidSale(incoming()) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().clientSyncId == existing().clientSyncId &&
+          incoming().receipt_number == existing().receipt_number &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'customer_name', 'customer_phone', 'items', 'subtotal', 'discount',
+            'total_amount', 'amount_paid', 'balance_due', 'payment_method', 'payment_status',
+            'notes', 'sale_date', 'updatedAt'
+          ]);
+        allow delete: if isWorkspaceOwner(workspaceId) && isValidId(saleId);
+      }
+
+      match /expenses/{expenseId} {
+        allow get: if isWorkspaceOwner(workspaceId) && isValidId(expenseId);
+        allow list: if isVerifiedUser() && resource.data.ownerId == request.auth.uid;
+        allow create: if isWorkspaceOwner(workspaceId) && isValidId(expenseId) &&
+          isValidExpense(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isWorkspaceOwner(workspaceId) && isValidId(expenseId) &&
+          isValidExpense(incoming()) &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().clientSyncId == existing().clientSyncId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'title', 'category', 'amount', 'payment_method', 'vendor', 'notes', 'expense_date', 'updatedAt'
+          ]);
+        allow delete: if isWorkspaceOwner(workspaceId) && isValidId(expenseId);
+      }
+    }
+  }
+}

@@ -1,0 +1,59 @@
+appId: com.stanleyprint.businessmanager
+productName: STANLEY BUSINESS MANAGER
+copyright: Copyright © 2026 Stanley Print & Branding Studio
+directories:
+  output: release/windows
+  buildResources: public
+
+files:
+  - dist/**/*
+  - server.js
+  - electron/**/*
+  - public/icon.ico
+  - public/pwa-512x512.png
+  - firebase-applet-config.json
+  - package.json
+  - node_modules/better-sqlite3/**/*
+  - node_modules/bindings/**/*
+  - node_modules/file-uri-to-path/**/*
+  - node_modules/express/**/*
+  - node_modules/dotenv/**/*
+
+asarUnpack:
+  - "**/*.node"
+  - "node_modules/better-sqlite3/**"
+
+win:
+  icon: public/icon.ico
+  target:
+    - target: nsis
+      arch:
+        - x64
+    - target: msi
+      arch:
+        - x64
+    - target: portable
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: STANLEY BUSINESS MANAGER
+  installerIcon: public/icon.ico
+  uninstallerIcon: public/icon.ico
+  artifactName: StanleyBusinessManager-Setup-${version}-x64.exe
+
+msi:
+  artifactName: StanleyBusinessManager-${version}-x64.msi
+
+portable:
+  artifactName: StanleyBusinessManager-Portable-${version}-x64.exe
+
+publish:
+  provider: github
+  owner: stanley-print-studio
+  repo: stanley-business-manager
