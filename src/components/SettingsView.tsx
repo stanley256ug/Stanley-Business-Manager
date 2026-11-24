@@ -5,6 +5,7 @@ import {
   CloudDownload,
   CloudUpload,
   Copy,
+  CreditCard,
   DatabaseBackup,
   Download,
   FileSpreadsheet,
@@ -12,15 +13,23 @@ import {
   Info,
   KeyRound,
   LogOut,
+  Phone,
   RefreshCw,
   RotateCcw,
   Save,
   ShieldCheck,
+  Smartphone,
   Timer,
   Trash2,
   Upload,
 } from 'lucide-react';
 import {
+  BILLING_PLANS,
+  MOBILE_MONEY_ACCOUNTS,
+  MobileMoneyProvider,
+} from '../constants/billing';
+import {
+  BillingSubscription,
   BusinessSettings,
   Customer,
   Expense,
@@ -33,7 +42,6 @@ import {
 } from '../types';
 import { apiRequest } from '../utils/api';
 import { downloadFullWorkbookExcel } from '../utils/exports';
-import { PWAInstallButton } from './PWAInstallButton';
 
 const DEFAULT_LOGO = '/src/assets/images/stanley_brand_logo_1795171819618.jpg';
 
@@ -136,6 +144,46 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const restoreInputRef = useRef<HTMLInputElement | null>(null);
   const [pendingBackupData, setPendingBackupData] = useState<any | null>(null);
   const [confirmClearOpen, setConfirmClearOpen] = useState(false);
+
+  // Subscription & Mobile Money Billing
+  const [billingInfo, setBillingInfo] = useState<{
+    plan: string;
+    status: string;
+    expires_at: string | null;
+  }>({
+    plan: user.subscription_plan || 'legacy',
+    status: user.subscription_status || 'active',
+    expires_at: user.subscription_expires_at ?? null,
+  });
+  const [billingHistory, setBillingHistory] = useState<BillingSubscription[]>([]);
+  const [renewOpen, setRenewOpen] = useState(false);
+  const [renewPlan, setRenewPlan] = useState<'monthly_1m' | 'annual_1y'>('monthly_1m');
+  const [renewProvider, setRenewProvider] = useState<MobileMoneyProvider>('airtel');
+  const [renewPhone, setRenewPhone] = useState('');
+  const [renewPayerName, setRenewPayerName] = useState(user.full_name || '');
+  const [renewTxId, setRenewTxId] = useState('');
+  const [submittingRenew, setSubmittingRenew] = useState(false);
+  const [copiedMerchant, setCopiedMerchant] = useState<MobileMoneyProvider | null>(null);
+
+  React.useEffect(() => {
+    if (!isOnline) return;
+    let active = true;
+    void apiRequest<{
+      subscription: { plan: string; status: string; expires_at: string | null };
+      history: BillingSubscription[];
+    }>('/api/billing/me')
+      .then((res) => {
+        if (!active) return;
+        if (res.subscription) setBillingInfo(res.subscription);
+        if (Array.isArray(res.history)) setBillingHistory(res.history);
+      })
+      .catch(() => {
+        // non-fatal when offline
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOnline, user.id]);
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -320,6 +368,51 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
+  const handleRenewSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmittingRenew(true);
+    try {
+      const res = await apiRequest<{
+        subscription: BillingSubscription;
+        user: UserProfile;
+      }>('/api/billing/renew', {
+        method: 'POST',
+        body: JSON.stringify({
+          planCode: renewPlan,
+          paymentProvider: renewProvider,
+          payerPhone: renewPhone.trim(),
+          payerName: renewPayerName.trim(),
+          transactionId: renewTxId.trim().toUpperCase(),
+        }),
+      });
+      onUserUpdated(res.user);
+      setBillingInfo({
+        plan: res.user.subscription_plan || renewPlan,
+        status: res.user.subscription_status || 'pending_verification',
+        expires_at: res.user.subscription_expires_at ?? res.subscription.expires_at,
+      });
+      setBillingHistory((prev) => [res.subscription, ...prev]);
+      setRenewTxId('');
+      setRenewOpen(false);
+      onNotify('Mobile Money renewal submitted and sent to administrator for verification.');
+    } catch (err: any) {
+      onNotify(err.message || 'Could not submit renewal payment.', 'error');
+    } finally {
+      setSubmittingRenew(false);
+    }
+  };
+
+  const currentPlanLabel =
+    billingInfo.plan === 'trial_24h'
+      ? '24-Hour Free Trial (UGX 0)'
+      : billingInfo.plan === 'monthly_1m'
+      ? '1 Month Plan (UGX 10,000)'
+      : billingInfo.plan === 'annual_1y'
+      ? '1 Year Plan (UGX 100,000)'
+      : user.role === 'Administrator'
+      ? 'Administrator Access (Exempt)'
+      : 'Legacy Workspace Plan';
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -339,6 +432,258 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <Info className="w-3.5 h-3.5 text-[#0B1D3A]" />
           About &amp; Shortcuts (v1.0.0)
         </button>
+      </div>
+
+      {/* Subscription Plan & Mobile Money Billing */}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <CreditCard className="w-5 h-5 text-[#0B1D3A]" />
+            <div>
+              <h3 className="text-base font-bold text-slate-900">
+                Subscription Plan &amp; Mobile Money Billing
+              </h3>
+              <p className="text-xs text-slate-500">
+                24-Hour Trial · 1 Month (UGX 10,000) · 1 Year (UGX 100,000) via Airtel Money or MTN MoMo
+              </p>
+            </div>
+          </div>
+          {user.role !== 'Administrator' && (
+            <button
+              type="button"
+              onClick={() => setRenewOpen((v) => !v)}
+              className="h-9 px-3.5 rounded-lg bg-[#0B1D3A] hover:bg-[#132B52] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+            >
+              <CreditCard className="w-3.5 h-3.5 text-[#C89B3C]" />
+              {renewOpen ? 'Close Renewal Form' : 'Renew or Upgrade Plan'}
+            </button>
+          )}
+        </div>
+
+        <div className="p-6 space-y-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 p-4 rounded-xl bg-slate-50 border border-slate-200 text-xs">
+            <div className="space-y-1">
+              <p className="text-slate-500">Current Plan</p>
+              <p className="font-bold text-slate-900">{currentPlanLabel}</p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-slate-500">Status</p>
+              <p
+                className={`font-bold capitalize ${
+                  billingInfo.status === 'active'
+                    ? 'text-emerald-700'
+                    : billingInfo.status === 'pending_verification'
+                    ? 'text-amber-700'
+                    : 'text-red-700'
+                }`}
+              >
+                {billingInfo.status.replace('_', ' ')}
+              </p>
+            </div>
+            <div className="space-y-1">
+              <p className="text-slate-500">Valid Until</p>
+              <p className="font-mono tabular-nums font-semibold text-slate-900">
+                {billingInfo.expires_at
+                  ? new Date(billingInfo.expires_at).toLocaleString()
+                  : 'Unlimited / Legacy'}
+              </p>
+            </div>
+          </div>
+
+          {renewOpen && (
+            <form
+              onSubmit={handleRenewSubmit}
+              className="p-4 sm:p-5 rounded-xl border border-slate-200 bg-slate-50/70 space-y-4"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {BILLING_PLANS.filter((p) => p.code !== 'trial_24h').map((plan) => (
+                  <button
+                    key={plan.code}
+                    type="button"
+                    onClick={() => setRenewPlan(plan.code as 'monthly_1m' | 'annual_1y')}
+                    className={`text-left p-3.5 rounded-xl border transition-all cursor-pointer ${
+                      renewPlan === plan.code
+                        ? 'bg-amber-50/50 border-[#0B1D3A] ring-2 ring-[#C89B3C]/40'
+                        : 'bg-white border-slate-200 hover:border-slate-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between text-xs font-bold text-[#0B1D3A]">
+                      <span>{plan.name}</span>
+                      <span>{plan.durationLabel}</span>
+                    </div>
+                    <p className="text-lg font-bold font-mono tabular-nums text-slate-900 mt-1">
+                      {plan.priceLabel}
+                    </p>
+                    <p className="text-[11px] text-slate-600 mt-0.5">{plan.summary}</p>
+                  </button>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {(['airtel', 'mtn'] as MobileMoneyProvider[]).map((net) => {
+                  const acct = MOBILE_MONEY_ACCOUNTS[net];
+                  const active = renewProvider === net;
+                  return (
+                    <div
+                      key={net}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setRenewProvider(net)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setRenewProvider(net);
+                        }
+                      }}
+                      className={`p-3 rounded-xl border cursor-pointer space-y-1.5 ${
+                        active
+                          ? `${acct.accentBg} ${acct.accentBorder} ring-2 ring-[#0B1D3A]/20`
+                          : 'bg-white border-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between text-xs font-bold">
+                        <span className={`inline-flex items-center gap-1.5 ${acct.accentText}`}>
+                          <Smartphone className="w-3.5 h-3.5" />
+                          {acct.name}
+                        </span>
+                        <span className="text-[11px] text-slate-600">
+                          {active ? 'Selected' : 'Select'}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 bg-white rounded-lg border border-slate-200 px-2.5 py-1.5">
+                        <span className="text-xs font-bold font-mono tabular-nums text-slate-900 inline-flex items-center gap-1.5">
+                          <Phone className="w-3 h-3 text-slate-500" />
+                          {acct.phone}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={async (ev) => {
+                            ev.stopPropagation();
+                            try {
+                              await navigator.clipboard.writeText(acct.phone);
+                              setCopiedMerchant(net);
+                              setTimeout(() => setCopiedMerchant(null), 2000);
+                            } catch {
+                              // ignore
+                            }
+                          }}
+                          className="text-[11px] font-semibold text-slate-700 inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          {copiedMerchant === net ? (
+                            <Check className="w-3 h-3 text-emerald-600" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          {copiedMerchant === net ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-slate-600">{acct.ussdHint}</p>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Payer Phone Number *
+                  </label>
+                  <input
+                    type="tel"
+                    required
+                    value={renewPhone}
+                    onChange={(e) => setRenewPhone(e.target.value)}
+                    placeholder="+256 7XX XXX XXX"
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs font-mono tabular-nums"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Mobile Money Account Name *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={renewPayerName}
+                    onChange={(e) => setRenewPayerName(e.target.value)}
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Transaction ID / Reference *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    minLength={6}
+                    value={renewTxId}
+                    onChange={(e) => setRenewTxId(e.target.value.toUpperCase())}
+                    placeholder="e.g. MP261122.1408..."
+                    className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-xs font-mono uppercase"
+                  />
+                </div>
+              </div>
+
+              <button
+                type="submit"
+                disabled={submittingRenew}
+                className="h-10 px-4 rounded-lg bg-[#0B1D3A] hover:bg-[#132B52] disabled:opacity-60 text-white text-xs font-semibold cursor-pointer"
+              >
+                {submittingRenew
+                  ? 'Submitting Payment...'
+                  : `Submit ${MOBILE_MONEY_ACCOUNTS[renewProvider].shortName} Renewal (${
+                      renewPlan === 'annual_1y' ? 'UGX 100,000' : 'UGX 10,000'
+                    })`}
+              </button>
+            </form>
+          )}
+
+          {billingHistory.length > 0 && (
+            <div className="overflow-x-auto border border-slate-200 rounded-xl">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-slate-500 font-semibold">
+                    <th className="py-2.5 px-3 whitespace-nowrap">Plan</th>
+                    <th className="py-2.5 px-3 whitespace-nowrap">Amount</th>
+                    <th className="py-2.5 px-3 whitespace-nowrap">Method / Recipient</th>
+                    <th className="py-2.5 px-3 whitespace-nowrap">Tx ID / Pass</th>
+                    <th className="py-2.5 px-3 whitespace-nowrap">Status</th>
+                    <th className="py-2.5 px-3 whitespace-nowrap">Expires</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {billingHistory.map((h) => (
+                    <tr key={h.id}>
+                      <td className="py-2.5 px-3 font-semibold text-slate-900 whitespace-nowrap">
+                        {h.plan_name}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono tabular-nums text-slate-800 whitespace-nowrap">
+                        UGX {Number(h.amount_ugx || 0).toLocaleString()}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
+                        {h.payment_provider === 'airtel'
+                          ? `Airtel (${h.recipient_number})`
+                          : h.payment_provider === 'mtn'
+                          ? `MTN MoMo (${h.recipient_number})`
+                          : '24h Trial'}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono text-slate-700 whitespace-nowrap">
+                        {h.transaction_id || h.pass_code}
+                      </td>
+                      <td className="py-2.5 px-3 font-semibold capitalize whitespace-nowrap">
+                        {h.status.replace('_', ' ')}
+                      </td>
+                      <td className="py-2.5 px-3 font-mono tabular-nums text-slate-600 whitespace-nowrap">
+                        {new Date(h.expires_at).toLocaleString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Cloud Synchronization & Offline Outbox */}
@@ -516,7 +861,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   className="h-9 px-3 rounded-lg border border-slate-200 text-xs text-slate-600 hover:bg-slate-50 inline-flex items-center gap-1.5 cursor-pointer"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  Use Stanley Default Logo
+                  Use Default Logo
                 </button>
               </div>
               <p className="text-[11px] text-slate-500">
@@ -678,7 +1023,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex items-center gap-2">
             <ShieldCheck className="w-4 h-4 text-[#0B1D3A]" />
             <h3 className="text-base font-bold text-slate-900">
-              Administrator Security &amp; Auto-Lock
+              {user.role === 'Administrator'
+                ? 'Administrator Security & Auto-Lock'
+                : 'Account Security & Auto-Lock'}
             </h3>
           </div>
           <div className="p-6 space-y-4">
@@ -720,7 +1067,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Admin Username
+                  Username
                 </label>
                 <input
                   type="text"
@@ -733,7 +1080,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Admin Email
+                Account Email
               </label>
               <input
                 type="email"
@@ -747,13 +1094,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <div className="pt-2 border-t border-slate-100 space-y-3">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  {user.auth_provider === 'google'
-                    ? 'Current Local Password (optional for Google-linked accounts)'
+                  {user.auth_provider === 'google' || user.auth_provider === 'icloud'
+                    ? 'Current Local Password (optional for Google / iCloud-linked accounts)'
                     : 'Current Password * (required to save changes)'}
                 </label>
                 <input
                   type="password"
-                  required={user.auth_provider !== 'google'}
+                  required={user.auth_provider !== 'google' && user.auth_provider !== 'icloud'}
                   value={currentPassword}
                   onChange={(e) => setCurrentPassword(e.target.value)}
                   placeholder="Enter current password"
@@ -928,8 +1275,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </p>
 
             <div className="space-y-3">
-              <PWAInstallButton variant="card" showWhenInstalled allowPackagingKit />
-
               {window.electronAPI?.checkForUpdates && (
                 <button
                   type="button"

@@ -68,7 +68,7 @@ export async function pushWorkspaceToCloud(
     const s = data.settings;
     const wsPayload = {
       ownerId: uid,
-      business_name: clampStr(s.business_name || 'Stanley Print & Branding Studio', 150),
+      business_name: clampStr(s.business_name || 'My Business Studio', 150),
       tagline: clampStr(s.tagline, 200),
       logo_url: clampStr(s.logo_url, 500000),
       phone_primary: clampStr(s.phone_primary, 40),

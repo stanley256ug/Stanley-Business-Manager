@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>STANLEY BUSINESS MANAGER — Extension Settings</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="options-mode">
+    <div class="card" style="padding:0;overflow:hidden;">
+      <div class="topbar" style="position:static;">
+        <div class="brand-wrap">
+          <img src="icons/icon48.png" alt="Logo" class="brand-icon" />
+          <div>
+            <div class="brand-kicker">STANLEY BUSINESS MANAGER</div>
+            <div class="brand-title">Chrome Extension Settings</div>
+          </div>
+        </div>
+      </div>
+
+      <form id="options-form" style="padding:18px;display:flex;flex-direction:column;gap:14px;">
+        <div id="status-banner" class="banner hidden"></div>
+
+        <div class="field">
+          <label for="server-url">Workspace Server URL</label>
+          <input
+            id="server-url"
+            type="url"
+            required
+            placeholder="https://your-business-server.example.com"
+          />
+          <span class="muted">
+            Select or enter the URL where your STANLEY BUSINESS MANAGER server is hosted.
+          </span>
+        </div>
+
+        <div style="display:flex;flex-wrap:wrap;gap:8px;">
+          <button type="button" id="preset-prod" class="btn btn-outline">Use Production Cloud</button>
+          <button type="button" id="preset-local" class="btn btn-outline">Use Localhost (3000)</button>
+        </div>
+
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding-top:10px;border-top:1px solid #E2E8F0;">
+          <button type="button" id="sign-out-btn" class="btn btn-outline">Clear Saved Session</button>
+          <button type="submit" class="btn btn-primary">Save Settings</button>
+        </div>
+      </form>
+    </div>
+
+    <script src="options.js"></script>
+  </body>
+</html>

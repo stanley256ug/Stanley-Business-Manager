@@ -1,10 +1,13 @@
 import { AppBootstrapData } from '../types';
 
 const DB_NAME = 'stanley_business_offline_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_SNAPSHOT = 'snapshot';
 const STORE_OUTBOX = 'outbox';
-const SNAPSHOT_KEY = 'latest_bootstrap';
+
+function snapshotKey(userId: number): string {
+  return `snapshot_user_${userId}`;
+}
 
 export type OutboxOperationType =
   | 'create_sale'
@@ -26,6 +29,7 @@ export type OutboxOperationType =
 
 export interface OutboxItem {
   id: string;
+  userId: number;
   operation: OutboxOperationType;
   targetId?: number;
   payload: any;
@@ -62,12 +66,12 @@ export function generateClientSyncId(prefix = 'sbm'): string {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export async function saveOfflineSnapshot(data: AppBootstrapData): Promise<void> {
+export async function saveOfflineSnapshot(userId: number, data: AppBootstrapData): Promise<void> {
   try {
     const db = await openDb();
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_SNAPSHOT, 'readwrite');
-      tx.objectStore(STORE_SNAPSHOT).put(data, SNAPSHOT_KEY);
+      tx.objectStore(STORE_SNAPSHOT).put(data, snapshotKey(userId));
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -77,12 +81,12 @@ export async function saveOfflineSnapshot(data: AppBootstrapData): Promise<void>
   }
 }
 
-export async function loadOfflineSnapshot(): Promise<AppBootstrapData | null> {
+export async function loadOfflineSnapshot(userId: number): Promise<AppBootstrapData | null> {
   try {
     const db = await openDb();
     const result = await new Promise<AppBootstrapData | null>((resolve, reject) => {
       const tx = db.transaction(STORE_SNAPSHOT, 'readonly');
-      const req = tx.objectStore(STORE_SNAPSHOT).get(SNAPSHOT_KEY);
+      const req = tx.objectStore(STORE_SNAPSHOT).get(snapshotKey(userId));
       req.onsuccess = () => resolve((req.result as AppBootstrapData) || null);
       req.onerror = () => reject(req.error);
     });
@@ -94,12 +98,14 @@ export async function loadOfflineSnapshot(): Promise<AppBootstrapData | null> {
 }
 
 export async function enqueueOutbox(
+  userId: number,
   operation: OutboxOperationType,
   payload: any,
   targetId?: number
 ): Promise<OutboxItem> {
   const item: OutboxItem = {
     id: generateClientSyncId('op'),
+    userId,
     operation,
     targetId,
     payload,
@@ -117,7 +123,7 @@ export async function enqueueOutbox(
   return item;
 }
 
-export async function getOutboxItems(): Promise<OutboxItem[]> {
+export async function getOutboxItems(userId: number): Promise<OutboxItem[]> {
   try {
     const db = await openDb();
     const items = await new Promise<OutboxItem[]>((resolve, reject) => {
@@ -127,7 +133,9 @@ export async function getOutboxItems(): Promise<OutboxItem[]> {
       req.onerror = () => reject(req.error);
     });
     db.close();
-    return items.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    return items
+      .filter((item) => item.userId === userId || (item.userId === undefined && userId === 1))
+      .sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
   } catch {
     return [];
   }

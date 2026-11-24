@@ -1,11 +1,15 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
 import {
+  AlertTriangle,
+  ArrowLeft,
   BarChart3,
   ClipboardList,
   Cloud,
+  CreditCard,
   FileSpreadsheet,
   Info,
+  KeyRound,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -14,6 +18,7 @@ import {
   Receipt,
   RefreshCw,
   Settings,
+  ShieldAlert,
   TrendingUp,
   Users,
   Wallet,
@@ -22,6 +27,7 @@ import {
 } from 'lucide-react';
 import {
   AppBootstrapData,
+  AppNotification,
   BusinessSettings,
   Customer,
   Expense,
@@ -44,6 +50,12 @@ import {
   saveOfflineSnapshot,
 } from './utils/offlineDb';
 import { pullWorkspaceFromCloud, pushWorkspaceToCloud } from './utils/cloudSync';
+import {
+  BrowserNotificationPermission,
+  getBrowserNotificationPermission,
+  requestBrowserNotificationPermission,
+  triggerBrowserNotification,
+} from './utils/browserNotifications';
 import { AuthLogin } from './components/AuthLogin';
 import { DashboardView } from './components/DashboardView';
 import { SalesView } from './components/SalesView';
@@ -54,10 +66,13 @@ import { ProductsView } from './components/ProductsView';
 import { CustomersView } from './components/CustomersView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { ReportsView } from './components/ReportsView';
-import { CloudUserInfo, SettingsView } from './components/SettingsView';
+import { SettingsView, CloudUserInfo } from './components/SettingsView';
+import { AdminMonitorView } from './components/AdminMonitorView';
 import { ReceiptViewerModal } from './components/ReceiptViewerModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { NotificationCenter } from './components/NotificationCenter';
 import { AboutModal } from './components/AboutModal';
+import { BusinessProfileSetupModal } from './components/BusinessProfileSetupModal';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 
 const CACHED_USER_KEY = 'sbm_cached_user';
@@ -105,20 +120,27 @@ function setCachedUser(user: UserProfile | null) {
   }
 }
 
+const PUBLIC_LOGIN_BRAND = {
+  business_name: 'STANLEY BUSINESS MANAGER',
+  logo_url: '/src/assets/images/stanley_brand_logo_1795171819618.jpg',
+  location: 'Business Management, Receipts & Cloud Sync',
+};
+
 export default function App() {
   const [authChecked, setAuthChecked] = useState(false);
   const [user, setUser] = useState<UserProfile | null>(null);
-  const [showDefaultHint, setShowDefaultHint] = useState(true);
-  const [loginBrand, setLoginBrand] = useState({
-    business_name: 'Stanley Print & Branding Studio',
-    logo_url: '/src/assets/images/stanley_brand_logo_1795171819618.jpg',
-    location: 'Nasser Road, Kampala, Uganda',
-  });
+  const [loginBrand, setLoginBrand] = useState(PUBLIC_LOGIN_BRAND);
 
   const [data, setData] = useState<AppBootstrapData | null>(null);
   const [loadingData, setLoadingData] = useState(false);
   const [activeNav, setActiveNav] = useState<NavSection>('dashboard');
+  const [navStackDepth, setNavStackDepth] = useState(1);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [forceSignInTick, setForceSignInTick] = useState(0);
+  const [forceBillingTick, setForceBillingTick] = useState(0);
+  const [authBillingError, setAuthBillingError] = useState('');
+  const [exitWarning, setExitWarning] = useState<string | null>(null);
+  const [appExited, setAppExited] = useState(false);
 
   // Modal triggers across sections
   const [saleModalOpen, setSaleModalOpen] = useState(false);
@@ -127,6 +149,50 @@ export default function App() {
   const [orderModalOpen, setOrderModalOpen] = useState(false);
   const [activeReceipt, setActiveReceipt] = useState<Sale | null>(null);
   const [aboutOpen, setAboutOpen] = useState(false);
+
+  // Notifications state & refs
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [unreadNotificationsCount, setUnreadNotificationsCount] = useState(0);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [liveAlert, setLiveAlert] = useState<AppNotification | null>(null);
+  const [browserPermission, setBrowserPermission] = useState<BrowserNotificationPermission>(() =>
+    getBrowserNotificationPermission()
+  );
+  const seenNotificationIdsRef = useRef<Set<number>>(new Set());
+  const liveAlertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Navigation & Double-Back-to-Exit refs
+  const navStackRef = useRef<NavSection[]>(['dashboard']);
+  const activeNavRef = useRef<NavSection>('dashboard');
+  const userRef = useRef<UserProfile | null>(null);
+  const authModeRef = useRef<'billing' | 'signin' | 'register' | 'forgot'>('billing');
+  const overlaysRef = useRef({
+    notificationsOpen: false,
+    mobileMenuOpen: false,
+    activeReceipt: false,
+    aboutOpen: false,
+    saleModalOpen: false,
+    expenseModalOpen: false,
+    customerModalOpen: false,
+    orderModalOpen: false,
+  });
+  const lastBackAttemptRef = useRef<number>(0);
+  const exitWarningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ignoringPopStateRef = useRef<boolean>(false);
+  const historyInitializedRef = useRef<boolean>(false);
+
+  userRef.current = user;
+  activeNavRef.current = activeNav;
+  overlaysRef.current = {
+    notificationsOpen,
+    mobileMenuOpen,
+    activeReceipt: Boolean(activeReceipt),
+    aboutOpen,
+    saleModalOpen,
+    expenseModalOpen,
+    customerModalOpen,
+    orderModalOpen,
+  };
 
   // Offline outbox & Cloud Sync state
   const [outboxCount, setOutboxCount] = useState(0);
@@ -152,53 +218,321 @@ export default function App() {
     }, 3800);
   }, []);
 
-  const refreshOutboxCount = useCallback(async () => {
-    const items = await getOutboxItems();
-    setOutboxCount(items.length);
+  const clearExitWarning = useCallback(() => {
+    if (exitWarningTimerRef.current) {
+      clearTimeout(exitWarningTimerRef.current);
+      exitWarningTimerRef.current = null;
+    }
+    lastBackAttemptRef.current = 0;
+    setExitWarning(null);
   }, []);
+
+  const showExitWarning = useCallback(() => {
+    lastBackAttemptRef.current = Date.now();
+    setExitWarning('Press Back again to exit STANLEY BUSINESS MANAGER.');
+    if (exitWarningTimerRef.current) {
+      clearTimeout(exitWarningTimerRef.current);
+    }
+    exitWarningTimerRef.current = setTimeout(() => {
+      lastBackAttemptRef.current = 0;
+      setExitWarning(null);
+      exitWarningTimerRef.current = null;
+    }, 2600);
+  }, []);
+
+  const navigateTo = useCallback(
+    (next: NavSection) => {
+      clearExitWarning();
+      if (activeNavRef.current === next) {
+        setActiveNav(next);
+        return;
+      }
+      const stack = [...navStackRef.current, next].slice(-50);
+      navStackRef.current = stack;
+      activeNavRef.current = next;
+      setActiveNav(next);
+      setNavStackDepth(stack.length);
+      try {
+        window.history.pushState({ sbmNav: next, sbmIdx: stack.length - 1 }, '');
+      } catch {
+        // ignore history sandbox errors
+      }
+    },
+    [clearExitWarning]
+  );
+
+  const resetNavigationRoot = useCallback(
+    (home: NavSection) => {
+      clearExitWarning();
+      navStackRef.current = [home];
+      activeNavRef.current = home;
+      setActiveNav(home);
+      setNavStackDepth(1);
+      setAppExited(false);
+      try {
+        if (!historyInitializedRef.current) {
+          window.history.replaceState({ sbmRoot: true, sbmNav: home, sbmIdx: 0 }, '');
+          window.history.pushState({ sbmGuard: true, sbmNav: home, sbmIdx: 0 }, '');
+          historyInitializedRef.current = true;
+        } else if (window.history.state?.sbmGuard) {
+          window.history.replaceState({ sbmGuard: true, sbmNav: home, sbmIdx: 0 }, '');
+        } else {
+          window.history.pushState({ sbmGuard: true, sbmNav: home, sbmIdx: 0 }, '');
+        }
+      } catch {
+        // ignore
+      }
+    },
+    [clearExitWarning]
+  );
+
+  const handleAuthModeChange = useCallback(
+    (nextMode: 'billing' | 'signin' | 'register' | 'forgot') => {
+      clearExitWarning();
+      const prevMode = authModeRef.current;
+      authModeRef.current = nextMode;
+      if (prevMode === 'billing' && nextMode !== 'billing') {
+        try {
+          window.history.pushState({ sbmAuthMode: nextMode }, '');
+        } catch {
+          // ignore
+        }
+      } else if (prevMode === 'signin' && nextMode === 'forgot') {
+        try {
+          window.history.pushState({ sbmAuthMode: nextMode }, '');
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [clearExitWarning]
+  );
+
+  const closeTopOverlay = useCallback((): boolean => {
+    const o = overlaysRef.current;
+    if (o.notificationsOpen) {
+      setNotificationsOpen(false);
+      return true;
+    }
+    if (o.mobileMenuOpen) {
+      setMobileMenuOpen(false);
+      return true;
+    }
+    if (o.activeReceipt) {
+      setActiveReceipt(null);
+      return true;
+    }
+    if (o.aboutOpen) {
+      setAboutOpen(false);
+      return true;
+    }
+    if (o.saleModalOpen) {
+      setSaleModalOpen(false);
+      return true;
+    }
+    if (o.expenseModalOpen) {
+      setExpenseModalOpen(false);
+      return true;
+    }
+    if (o.customerModalOpen) {
+      setCustomerModalOpen(false);
+      return true;
+    }
+    if (o.orderModalOpen) {
+      setOrderModalOpen(false);
+      return true;
+    }
+    return false;
+  }, []);
+
+  const performAppExit = useCallback(
+    (fromPopState: boolean) => {
+      clearExitWarning();
+      try {
+        const capApp = (window as any).Capacitor?.Plugins?.App;
+        if (capApp && typeof capApp.exitApp === 'function') {
+          void capApp.exitApp();
+        }
+      } catch {
+        // ignore
+      }
+      try {
+        window.close();
+      } catch {
+        // ignore
+      }
+      try {
+        ignoringPopStateRef.current = true;
+        if (fromPopState) {
+          window.history.back();
+        } else {
+          window.history.go(-2);
+        }
+      } catch {
+        // ignore
+      }
+      setTimeout(() => {
+        ignoringPopStateRef.current = false;
+        setAppExited(true);
+      }, 180);
+    },
+    [clearExitWarning]
+  );
+
+  const handleBackAction = useCallback(
+    (fromPopState: boolean) => {
+      if (appExited) return;
+
+      if (closeTopOverlay()) {
+        clearExitWarning();
+        if (fromPopState) {
+          try {
+            window.history.pushState(
+              navStackRef.current.length > 1
+                ? { sbmNav: activeNavRef.current, sbmIdx: navStackRef.current.length - 1 }
+                : { sbmGuard: true, sbmNav: activeNavRef.current, sbmIdx: 0 },
+              ''
+            );
+          } catch {
+            // ignore
+          }
+        }
+        return;
+      }
+
+      if (!userRef.current && authModeRef.current !== 'billing') {
+        clearExitWarning();
+        if (authModeRef.current === 'forgot') {
+          authModeRef.current = 'signin';
+          setForceSignInTick((t) => t + 1);
+        } else {
+          authModeRef.current = 'billing';
+          setForceBillingTick((t) => t + 1);
+        }
+        if (!fromPopState && window.history.state?.sbmAuthMode) {
+          try {
+            ignoringPopStateRef.current = true;
+            window.history.back();
+            setTimeout(() => {
+              ignoringPopStateRef.current = false;
+            }, 120);
+          } catch {
+            ignoringPopStateRef.current = false;
+          }
+        }
+        return;
+      }
+
+      if (userRef.current && navStackRef.current.length > 1) {
+        clearExitWarning();
+        const nextStack = navStackRef.current.slice(0, -1);
+        const prevNav = nextStack[nextStack.length - 1];
+        navStackRef.current = nextStack;
+        activeNavRef.current = prevNav;
+        setActiveNav(prevNav);
+        setNavStackDepth(nextStack.length);
+        if (!fromPopState && window.history.state?.sbmNav && !window.history.state?.sbmGuard) {
+          try {
+            ignoringPopStateRef.current = true;
+            window.history.back();
+            setTimeout(() => {
+              ignoringPopStateRef.current = false;
+            }, 120);
+          } catch {
+            ignoringPopStateRef.current = false;
+          }
+        }
+        return;
+      }
+
+      const now = Date.now();
+      const isDoubleBack =
+        lastBackAttemptRef.current > 0 && now - lastBackAttemptRef.current <= 2600;
+      if (isDoubleBack) {
+        performAppExit(fromPopState);
+        return;
+      }
+
+      showExitWarning();
+      if (fromPopState) {
+        try {
+          window.history.pushState(
+            { sbmGuard: true, sbmNav: activeNavRef.current, sbmIdx: 0 },
+            ''
+          );
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [appExited, clearExitWarning, closeTopOverlay, performAppExit, showExitWarning]
+  );
+
+  const refreshOutboxCount = useCallback(
+    async (uid?: number) => {
+      const targetId = uid ?? user?.id;
+      if (!targetId) {
+        setOutboxCount(0);
+        return;
+      }
+      const items = await getOutboxItems(targetId);
+      setOutboxCount(items.length);
+    },
+    [user?.id]
+  );
 
   const updateDataAndCache = useCallback(
     (updater: (prev: AppBootstrapData) => AppBootstrapData) => {
       setData((prev) => {
         if (!prev) return prev;
         const next = updater(prev);
-        void saveOfflineSnapshot(next);
+        if (user?.id) {
+          void saveOfflineSnapshot(user.id, next);
+        }
         return next;
       });
     },
-    []
+    [user?.id]
   );
 
-  const loadBootstrap = useCallback(async () => {
-    setLoadingData(true);
-    try {
-      const payload = await apiRequest<AppBootstrapData>('/api/bootstrap');
-      setData(payload);
-      await saveOfflineSnapshot(payload);
-    } catch (err: any) {
-      if (err.status === 401) {
-        setUser(null);
-        setStoredToken(null);
-        setCachedUser(null);
-      } else {
-        const cached = await loadOfflineSnapshot();
-        if (cached) {
-          setData(cached);
-          if (isNetworkFailure(err)) {
-            notify('Loaded offline cached business records.', 'success');
+  const loadBootstrap = useCallback(
+    async (uid?: number) => {
+      const targetId = uid ?? user?.id;
+      setLoadingData(true);
+      try {
+        const payload = await apiRequest<AppBootstrapData>('/api/bootstrap');
+        setData(payload);
+        if (targetId) {
+          await saveOfflineSnapshot(targetId, payload);
+        }
+      } catch (err: any) {
+        if (err.status === 401) {
+          setUser(null);
+          setStoredToken(null);
+          setCachedUser(null);
+        } else if (targetId) {
+          const cached = await loadOfflineSnapshot(targetId);
+          if (cached) {
+            setData(cached);
+            if (isNetworkFailure(err)) {
+              notify('Loaded offline cached business records.', 'success');
+            }
+          } else {
+            notify(err.message || 'Failed to load business data.', 'error');
           }
         } else {
           notify(err.message || 'Failed to load business data.', 'error');
         }
+      } finally {
+        setLoadingData(false);
       }
-    } finally {
-      setLoadingData(false);
-    }
-  }, [notify]);
+    },
+    [notify, user?.id]
+  );
 
   const flushOutbox = useCallback(async () => {
     if (!navigator.onLine || syncingRef.current || !user) return;
-    const items = await getOutboxItems();
+    const items = await getOutboxItems(user.id);
     if (items.length === 0) {
       setOutboxCount(0);
       return;
@@ -316,11 +650,11 @@ export default function App() {
         }
       }
 
-      await refreshOutboxCount();
+      await refreshOutboxCount(user.id);
       if (syncedAny) {
         const fresh = await apiRequest<AppBootstrapData>('/api/bootstrap');
         setData(fresh);
-        await saveOfflineSnapshot(fresh);
+        await saveOfflineSnapshot(user.id, fresh);
         if (cloudUser) {
           await pushWorkspaceToCloud(cloudUser.uid, fresh);
           const now = new Date().toISOString();
@@ -345,7 +679,6 @@ export default function App() {
   useEffect(() => {
     let mounted = true;
     void testFirestoreConnection();
-    void refreshOutboxCount();
 
     const unsubscribeAuth = onAuthStateChanged(auth, (fbUser) => {
       if (!mounted) return;
@@ -365,24 +698,38 @@ export default function App() {
         const session = await apiRequest<{
           authenticated: boolean;
           user: UserProfile | null;
-          showDefaultHint: boolean;
+          subscriptionRequired?: boolean;
+          subscriptionError?: string;
           brand: any;
         }>('/api/auth/session');
         if (!mounted) return;
         if (session.brand) setLoginBrand(session.brand);
-        setShowDefaultHint(session.showDefaultHint);
         if (session.authenticated && session.user) {
+          setAuthBillingError('');
           setUser(session.user);
           setCachedUser(session.user);
+          resetNavigationRoot(
+            session.user.role === 'Administrator' ? 'admin' : 'dashboard'
+          );
+          void refreshOutboxCount(session.user.id);
         } else {
+          if (session.subscriptionError) {
+            setAuthBillingError(session.subscriptionError);
+            setStoredToken(null);
+          }
           setCachedUser(null);
+          resetNavigationRoot('dashboard');
         }
       } catch (err: any) {
         if (!mounted) return;
         const cachedUser = getCachedUser();
         if (isNetworkFailure(err) && getStoredToken() && cachedUser) {
           setUser(cachedUser);
-          const cachedSnap = await loadOfflineSnapshot();
+          resetNavigationRoot(
+            cachedUser.role === 'Administrator' ? 'admin' : 'dashboard'
+          );
+          void refreshOutboxCount(cachedUser.id);
+          const cachedSnap = await loadOfflineSnapshot(cachedUser.id);
           if (cachedSnap) {
             setData(cachedSnap);
             setLoginBrand({
@@ -401,13 +748,70 @@ export default function App() {
       mounted = false;
       unsubscribeAuth();
     };
-  }, [refreshOutboxCount]);
+  }, [refreshOutboxCount, resetNavigationRoot]);
+
+  // Browser Back (popstate) & Android/Capacitor hardware Back listeners
+  useEffect(() => {
+    if (!historyInitializedRef.current) {
+      try {
+        window.history.replaceState({ sbmRoot: true, sbmNav: activeNavRef.current, sbmIdx: 0 }, '');
+        window.history.pushState({ sbmGuard: true, sbmNav: activeNavRef.current, sbmIdx: 0 }, '');
+        historyInitializedRef.current = true;
+      } catch {
+        // ignore
+      }
+    }
+
+    const onPopState = () => {
+      if (ignoringPopStateRef.current) {
+        ignoringPopStateRef.current = false;
+        return;
+      }
+      handleBackAction(true);
+    };
+
+    const onDocumentBackButton = (ev: Event) => {
+      ev.preventDefault();
+      handleBackAction(false);
+    };
+
+    window.addEventListener('popstate', onPopState);
+    document.addEventListener('backbutton', onDocumentBackButton, false);
+
+    let capListenerHandle: { remove?: () => Promise<void> | void } | null = null;
+    try {
+      const capApp = (window as any).Capacitor?.Plugins?.App;
+      if (capApp && typeof capApp.addListener === 'function') {
+        const maybeHandle = capApp.addListener('backButton', () => {
+          handleBackAction(false);
+        });
+        if (maybeHandle && typeof maybeHandle.then === 'function') {
+          void maybeHandle.then((h: any) => {
+            capListenerHandle = h;
+          });
+        } else {
+          capListenerHandle = maybeHandle;
+        }
+      }
+    } catch {
+      // ignore if not inside Capacitor
+    }
+
+    return () => {
+      window.removeEventListener('popstate', onPopState);
+      document.removeEventListener('backbutton', onDocumentBackButton, false);
+      if (capListenerHandle && typeof capListenerHandle.remove === 'function') {
+        void capListenerHandle.remove();
+      }
+    };
+  }, [handleBackAction]);
 
   useEffect(() => {
     if (user) {
-      loadBootstrap();
+      void loadBootstrap(user.id);
+      void refreshOutboxCount(user.id);
     }
-  }, [user, loadBootstrap]);
+  }, [user, loadBootstrap, refreshOutboxCount]);
 
   // Auto-flush outbox whenever connection returns
   useEffect(() => {
@@ -415,6 +819,223 @@ export default function App() {
       void flushOutbox();
     }
   }, [isOnline, user, outboxCount, flushOutbox]);
+
+  const showLiveAlert = useCallback((notif: AppNotification) => {
+    setLiveAlert(notif);
+    if (liveAlertTimerRef.current) {
+      clearTimeout(liveAlertTimerRef.current);
+    }
+    liveAlertTimerRef.current = setTimeout(() => {
+      setLiveAlert((prev) => (prev?.id === notif.id ? null : prev));
+      liveAlertTimerRef.current = null;
+    }, 5500);
+  }, []);
+
+  const handleIncomingNotification = useCallback(
+    (notif: AppNotification, triggerAlerts = true) => {
+      const alreadySeen = seenNotificationIdsRef.current.has(notif.id);
+      seenNotificationIdsRef.current.add(notif.id);
+
+      setNotifications((prev) => {
+        if (prev.some((p) => p.id === notif.id)) {
+          return prev.map((p) => (p.id === notif.id ? notif : p));
+        }
+        return [notif, ...prev].slice(0, 80);
+      });
+
+      if (!alreadySeen && !notif.is_read) {
+        setUnreadNotificationsCount((c) => c + 1);
+      }
+
+      if (triggerAlerts && !alreadySeen) {
+        showLiveAlert(notif);
+        void triggerBrowserNotification(notif.title, notif.message, `sbm-notif-${notif.id}`);
+      }
+    },
+    [showLiveAlert]
+  );
+
+  const fetchNotifications = useCallback(
+    async (announceRecentUnread = false) => {
+      if (!userRef.current) return;
+      try {
+        const res = await apiRequest<{
+          notifications: AppNotification[];
+          unreadCount: number;
+        }>('/api/notifications');
+        const list = Array.isArray(res.notifications) ? res.notifications : [];
+        const nowMs = Date.now();
+        let newestToAnnounce: AppNotification | null = null;
+
+        for (const item of list) {
+          const isNewToClient = !seenNotificationIdsRef.current.has(item.id);
+          seenNotificationIdsRef.current.add(item.id);
+          if (announceRecentUnread && isNewToClient && !item.is_read && !newestToAnnounce) {
+            const normalizedTs = item.created_at.includes('T')
+              ? item.created_at
+              : `${item.created_at.replace(' ', 'T')}Z`;
+            const createdMs = new Date(normalizedTs).getTime();
+            if (!Number.isNaN(createdMs) && nowMs - createdMs <= 25000) {
+              newestToAnnounce = item;
+            }
+          }
+        }
+
+        setNotifications(list);
+        setUnreadNotificationsCount(Number(res.unreadCount || 0));
+
+        if (newestToAnnounce) {
+          showLiveAlert(newestToAnnounce);
+          void triggerBrowserNotification(
+            newestToAnnounce.title,
+            newestToAnnounce.message,
+            `sbm-notif-${newestToAnnounce.id}`
+          );
+        }
+      } catch {
+        // Non-fatal if offline
+      }
+    },
+    [showLiveAlert]
+  );
+
+  useEffect(() => {
+    if (!user?.id) {
+      setNotifications([]);
+      setUnreadNotificationsCount(0);
+      setNotificationsOpen(false);
+      setLiveAlert(null);
+      seenNotificationIdsRef.current.clear();
+      return;
+    }
+
+    let cancelled = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let activeController: AbortController | null = null;
+
+    void fetchNotifications(true);
+
+    const connectStream = async () => {
+      if (cancelled || !navigator.onLine) return;
+      activeController = new AbortController();
+      const token = getStoredToken();
+      const headers: Record<string, string> = { Accept: 'text/event-stream' };
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+
+      try {
+        const resp = await fetch('/api/notifications/stream', {
+          method: 'GET',
+          headers,
+          credentials: 'include',
+          signal: activeController.signal,
+        });
+        if (!resp.ok || !resp.body) {
+          throw new Error(`Stream unavailable (${resp.status})`);
+        }
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (!cancelled) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const frames = buffer.split('\n\n');
+          buffer = frames.pop() || '';
+          for (const frame of frames) {
+            const dataLines = frame
+              .split('\n')
+              .filter((line) => line.startsWith('data:'))
+              .map((line) => line.slice(5).trim());
+            if (dataLines.length === 0) continue;
+            try {
+              const parsed = JSON.parse(dataLines.join('\n')) as AppNotification;
+              if (parsed && typeof parsed.id === 'number') {
+                handleIncomingNotification(parsed, true);
+              }
+            } catch {
+              // ignore malformed SSE chunk
+            }
+          }
+        }
+      } catch {
+        // Reconnect cleanly after brief backoff
+      } finally {
+        if (!cancelled) {
+          reconnectTimer = setTimeout(() => {
+            void connectStream();
+          }, 4000);
+        }
+      }
+    };
+
+    void connectStream();
+
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (activeController) activeController.abort();
+    };
+  }, [user?.id, fetchNotifications, handleIncomingNotification]);
+
+  const handleMarkNotificationRead = useCallback(async (id: number) => {
+    setNotifications((prev) =>
+      prev.map((n) => (n.id === id ? { ...n, is_read: true } : n))
+    );
+    setUnreadNotificationsCount((c) => Math.max(0, c - 1));
+    if (id > 0 && navigator.onLine) {
+      try {
+        const res = await apiRequest<{ ok: boolean; unreadCount: number }>(
+          `/api/notifications/${id}/read`,
+          { method: 'POST' }
+        );
+        setUnreadNotificationsCount(Number(res.unreadCount || 0));
+      } catch {
+        // ignore offline read errors
+      }
+    }
+  }, []);
+
+  const handleMarkAllNotificationsRead = useCallback(async () => {
+    setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+    setUnreadNotificationsCount(0);
+    if (navigator.onLine) {
+      try {
+        await apiRequest('/api/notifications/read-all', { method: 'POST' });
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  const handleClearNotifications = useCallback(async () => {
+    setNotifications([]);
+    setUnreadNotificationsCount(0);
+    if (navigator.onLine) {
+      try {
+        await apiRequest('/api/notifications', { method: 'DELETE' });
+      } catch {
+        // ignore
+      }
+    }
+  }, []);
+
+  const handleEnableBrowserAlerts = useCallback(async () => {
+    const result = await requestBrowserNotificationPermission();
+    setBrowserPermission(result);
+    if (result === 'granted') {
+      notify('Desktop & browser push alerts enabled for logins and new orders.');
+      void triggerBrowserNotification(
+        'Alerts Enabled — STANLEY BUSINESS MANAGER',
+        'You will be notified whenever someone logs in or a new order is registered.',
+        'sbm-alerts-enabled'
+      );
+    } else if (result === 'denied') {
+      notify('Browser notifications are blocked. Allow them in your browser site settings.', 'error');
+    }
+  }, [notify]);
 
   const handleLogout = useCallback(async () => {
     try {
@@ -426,7 +1047,17 @@ export default function App() {
     setCachedUser(null);
     setUser(null);
     setData(null);
-  }, []);
+    setNotifications([]);
+    setUnreadNotificationsCount(0);
+    setNotificationsOpen(false);
+    setLiveAlert(null);
+    seenNotificationIdsRef.current.clear();
+    authModeRef.current = 'billing';
+    setAuthBillingError('');
+    resetNavigationRoot('dashboard');
+    setOutboxCount(0);
+    setLoginBrand(PUBLIC_LOGIN_BRAND);
+  }, [resetNavigationRoot]);
 
   // Configurable inactivity auto-lock timer
   useEffect(() => {
@@ -453,34 +1084,39 @@ export default function App() {
     };
   }, [user, data?.settings?.inactivity_timeout_minutes, handleLogout, notify]);
 
-  // Global keyboard shortcuts (Alt+N, Alt+E, Alt+O, Alt+C, Alt+D, Alt+R, Alt+P)
+  // Global keyboard shortcuts (Alt+ArrowLeft / BrowserBack, Alt+N/E/O/C/D/R/P)
   useEffect(() => {
-    if (!user) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'BrowserBack' || (e.altKey && e.key === 'ArrowLeft')) {
+        e.preventDefault();
+        handleBackAction(false);
+        return;
+      }
+      if (!userRef.current) return;
       if (!e.altKey || e.ctrlKey || e.metaKey) return;
       const key = e.key.toLowerCase();
       if (key === 'n') {
         e.preventDefault();
-        setActiveNav('sales');
+        navigateTo('sales');
         setSaleModalOpen(true);
       } else if (key === 'e') {
         e.preventDefault();
-        setActiveNav('expenses');
+        navigateTo('expenses');
         setExpenseModalOpen(true);
       } else if (key === 'o') {
         e.preventDefault();
-        setActiveNav('orders');
+        navigateTo('orders');
         setOrderModalOpen(true);
       } else if (key === 'c') {
         e.preventDefault();
-        setActiveNav('customers');
+        navigateTo('customers');
         setCustomerModalOpen(true);
       } else if (key === 'd') {
         e.preventDefault();
-        setActiveNav('dashboard');
+        navigateTo('dashboard');
       } else if (key === 'r') {
         e.preventDefault();
-        setActiveNav('receipts');
+        navigateTo('receipts');
       } else if (key === 'p') {
         e.preventDefault();
         if (window.electronAPI?.printCurrent) {
@@ -492,7 +1128,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [user]);
+  }, [handleBackAction, navigateTo]);
 
   // Cloud Sync Handlers
   const handleCloudSignIn = async () => {
@@ -630,8 +1266,10 @@ export default function App() {
       payments: paid > 0 ? [{ id: tempId, sale_id: tempId, amount: paid, payment_method: payload.payment_method || 'Cash', note: 'Offline initial payment', paid_at: nowIso }] : [],
     };
 
-    await enqueueOutbox('create_sale', { ...enrichedPayload, receipt_number: receiptNumber }, tempId);
-    await refreshOutboxCount();
+    if (user) {
+      await enqueueOutbox(user.id, 'create_sale', { ...enrichedPayload, receipt_number: receiptNumber }, tempId);
+      await refreshOutboxCount(user.id);
+    }
 
     updateDataAndCache((prev) => ({
       ...prev,
@@ -680,8 +1318,10 @@ export default function App() {
       }
     }
 
-    await enqueueOutbox('record_payment', { amount, payment_method, note }, saleId);
-    await refreshOutboxCount();
+    if (user) {
+      await enqueueOutbox(user.id, 'record_payment', { amount, payment_method, note }, saleId);
+      await refreshOutboxCount(user.id);
+    }
 
     updateDataAndCache((prev) => {
       const targetSale = prev.sales.find((s) => s.id === saleId);
@@ -726,9 +1366,9 @@ export default function App() {
         if (!isNetworkFailure(err)) throw err;
       }
     }
-    if (saleId > 0) {
-      await enqueueOutbox('delete_sale', {}, saleId);
-      await refreshOutboxCount();
+    if (user && saleId > 0) {
+      await enqueueOutbox(user.id, 'delete_sale', {}, saleId);
+      await refreshOutboxCount(user.id);
     }
     updateDataAndCache((prev) => ({
       ...prev,
@@ -755,8 +1395,10 @@ export default function App() {
           if (!isNetworkFailure(err)) throw err;
         }
       }
-      await enqueueOutbox('update_expense', payload, id);
-      await refreshOutboxCount();
+      if (user) {
+        await enqueueOutbox(user.id, 'update_expense', payload, id);
+        await refreshOutboxCount(user.id);
+      }
       updateDataAndCache((prev) => ({
         ...prev,
         expenses: prev.expenses.map((e) => (e.id === id ? { ...e, ...payload } : e)),
@@ -794,8 +1436,10 @@ export default function App() {
         client_sync_id: syncId,
         created_at: new Date().toISOString(),
       };
-      await enqueueOutbox('create_expense', enriched, tempId);
-      await refreshOutboxCount();
+      if (user) {
+        await enqueueOutbox(user.id, 'create_expense', enriched, tempId);
+        await refreshOutboxCount(user.id);
+      }
       updateDataAndCache((prev) => ({
         ...prev,
         expenses: [offlineExpense, ...prev.expenses],
@@ -818,9 +1462,9 @@ export default function App() {
         if (!isNetworkFailure(err)) throw err;
       }
     }
-    if (id > 0) {
-      await enqueueOutbox('delete_expense', {}, id);
-      await refreshOutboxCount();
+    if (user && id > 0) {
+      await enqueueOutbox(user.id, 'delete_expense', {}, id);
+      await refreshOutboxCount(user.id);
     }
     updateDataAndCache((prev) => ({
       ...prev,
@@ -847,8 +1491,10 @@ export default function App() {
           if (!isNetworkFailure(err)) throw err;
         }
       }
-      await enqueueOutbox('update_product', payload, id);
-      await refreshOutboxCount();
+      if (user) {
+        await enqueueOutbox(user.id, 'update_product', payload, id);
+        await refreshOutboxCount(user.id);
+      }
       updateDataAndCache((prev) => ({
         ...prev,
         products: prev.products.map((p) => (p.id === id ? { ...p, ...payload } : p)),
@@ -888,8 +1534,10 @@ export default function App() {
         created_at: nowIso,
         updated_at: nowIso,
       };
-      await enqueueOutbox('create_product', enriched, tempId);
-      await refreshOutboxCount();
+      if (user) {
+        await enqueueOutbox(user.id, 'create_product', enriched, tempId);
+        await refreshOutboxCount(user.id);
+      }
       updateDataAndCache((prev) => ({
         ...prev,
         products: [...prev.products, offlineProduct],
@@ -912,9 +1560,9 @@ export default function App() {
         if (!isNetworkFailure(err)) throw err;
       }
     }
-    if (id > 0) {
-      await enqueueOutbox('delete_product', {}, id);
-      await refreshOutboxCount();
+    if (user && id > 0) {
+      await enqueueOutbox(user.id, 'delete_product', {}, id);
+      await refreshOutboxCount(user.id);
     }
     updateDataAndCache((prev) => ({
       ...prev,
@@ -941,8 +1589,10 @@ export default function App() {
           if (!isNetworkFailure(err)) throw err;
         }
       }
-      await enqueueOutbox('update_customer', payload, id);
-      await refreshOutboxCount();
+      if (user) {
+        await enqueueOutbox(user.id, 'update_customer', payload, id);
+        await refreshOutboxCount(user.id);
+      }
       updateDataAndCache((prev) => ({
         ...prev,
         customers: prev.customers.map((c) => (c.id === id ? { ...c, ...payload } : c)),
@@ -984,8 +1634,10 @@ export default function App() {
         order_count: 0,
         sale_count: 0,
       };
-      await enqueueOutbox('create_customer', enriched, tempId);
-      await refreshOutboxCount();
+      if (user) {
+        await enqueueOutbox(user.id, 'create_customer', enriched, tempId);
+        await refreshOutboxCount(user.id);
+      }
       updateDataAndCache((prev) => ({
         ...prev,
         customers: [...prev.customers, offlineCustomer],
@@ -1008,9 +1660,9 @@ export default function App() {
         if (!isNetworkFailure(err)) throw err;
       }
     }
-    if (id > 0) {
-      await enqueueOutbox('delete_customer', {}, id);
-      await refreshOutboxCount();
+    if (user && id > 0) {
+      await enqueueOutbox(user.id, 'delete_customer', {}, id);
+      await refreshOutboxCount(user.id);
     }
     updateDataAndCache((prev) => ({
       ...prev,
@@ -1037,8 +1689,10 @@ export default function App() {
           if (!isNetworkFailure(err)) throw err;
         }
       }
-      await enqueueOutbox('update_order', payload, id);
-      await refreshOutboxCount();
+      if (user) {
+        await enqueueOutbox(user.id, 'update_order', payload, id);
+        await refreshOutboxCount(user.id);
+      }
       updateDataAndCache((prev) => ({
         ...prev,
         orders: prev.orders.map((o) => (o.id === id ? { ...o, ...payload } : o)),
@@ -1059,6 +1713,7 @@ export default function App() {
             orders: [created, ...prev.orders],
           }));
           notify(`Order ${created.order_number} created.`);
+          void fetchNotifications(true);
           return;
         } catch (err: any) {
           if (!isNetworkFailure(err)) throw err;
@@ -1085,12 +1740,30 @@ export default function App() {
         created_at: nowIso,
         updated_at: nowIso,
       };
-      await enqueueOutbox('create_order', { ...enriched, order_number: orderNum }, tempId);
-      await refreshOutboxCount();
+      if (user) {
+        await enqueueOutbox(user.id, 'create_order', { ...enriched, order_number: orderNum }, tempId);
+        await refreshOutboxCount(user.id);
+      }
       updateDataAndCache((prev) => ({
         ...prev,
         orders: [offlineOrder, ...prev.orders],
       }));
+      handleIncomingNotification(
+        {
+          id: tempId,
+          target_user_id: user?.id || 0,
+          type: 'order',
+          title: 'New Order Registered',
+          message: `${orderNum} — ${offlineOrder.title} for ${offlineOrder.customer_name} (${data?.settings.currency || 'UGX'} ${offlineOrder.total_amount.toLocaleString('en-US')})`,
+          actor_user_id: user?.id || null,
+          actor_name: user?.full_name || offlineOrder.customer_name,
+          related_entity_type: 'order',
+          related_entity_id: String(tempId),
+          is_read: false,
+          created_at: nowIso,
+        },
+        true
+      );
       notify(`Order ${orderNum} saved offline — queued for sync.`);
     }
   };
@@ -1109,9 +1782,9 @@ export default function App() {
         if (!isNetworkFailure(err)) throw err;
       }
     }
-    if (id > 0) {
-      await enqueueOutbox('delete_order', {}, id);
-      await refreshOutboxCount();
+    if (user && id > 0) {
+      await enqueueOutbox(user.id, 'delete_order', {}, id);
+      await refreshOutboxCount(user.id);
     }
     updateDataAndCache((prev) => ({
       ...prev,
@@ -1166,8 +1839,10 @@ export default function App() {
         if (!isNetworkFailure(err)) throw err;
       }
     }
-    await enqueueOutbox('update_settings', payload);
-    await refreshOutboxCount();
+    if (user) {
+      await enqueueOutbox(user.id, 'update_settings', payload);
+      await refreshOutboxCount(user.id);
+    }
     updateDataAndCache((prev) => ({
       ...prev,
       settings: { ...prev.settings, ...payload },
@@ -1176,19 +1851,65 @@ export default function App() {
 
   const handleQuickAction = (action: 'sale' | 'expense' | 'customer' | 'order') => {
     if (action === 'sale') {
-      setActiveNav('sales');
+      navigateTo('sales');
       setSaleModalOpen(true);
     } else if (action === 'expense') {
-      setActiveNav('expenses');
+      navigateTo('expenses');
       setExpenseModalOpen(true);
     } else if (action === 'customer') {
-      setActiveNav('customers');
+      navigateTo('customers');
       setCustomerModalOpen(true);
     } else if (action === 'order') {
-      setActiveNav('orders');
+      navigateTo('orders');
       setOrderModalOpen(true);
     }
   };
+
+  const exitWarningBanner = exitWarning ? (
+    <div
+      role="alert"
+      aria-live="assertive"
+      className="no-print fixed bottom-6 left-1/2 -translate-x-1/2 z-[70] max-w-[92vw] px-4 py-3 rounded-xl bg-[#0B1D3A] text-white border-2 border-[#C89B3C] shadow-2xl flex items-center gap-3"
+    >
+      <AlertTriangle className="w-5 h-5 text-[#C89B3C] shrink-0" />
+      <p className="text-xs sm:text-sm font-semibold leading-snug">{exitWarning}</p>
+    </div>
+  ) : null;
+
+  if (appExited) {
+    return (
+      <div className="min-h-screen bg-[#0B1D3A] flex items-center justify-center p-6">
+        <div className="w-full max-w-sm bg-white rounded-xl border border-slate-200 shadow-2xl p-6 text-center space-y-4">
+          <div className="w-14 h-14 mx-auto rounded-xl overflow-hidden border border-amber-400/30 bg-[#0B1D3A]">
+            <img
+              src={loginBrand.logo_url}
+              alt="STANLEY BUSINESS MANAGER"
+              referrerPolicy="no-referrer"
+              className="w-full h-full object-cover"
+            />
+          </div>
+          <div className="space-y-1">
+            <h1 className="text-lg font-bold text-slate-900">Application Closed Safely</h1>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              You exited <strong>STANLEY BUSINESS MANAGER</strong>. You may close this window or
+              re-open your workspace below.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() =>
+              resetNavigationRoot(
+                user?.role === 'Administrator' ? 'admin' : 'dashboard'
+              )
+            }
+            className="w-full h-10 rounded-lg bg-[#0B1D3A] hover:bg-[#132B52] text-white text-xs font-semibold cursor-pointer"
+          >
+            Re-open Application
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   if (!authChecked) {
     return (
@@ -1200,18 +1921,36 @@ export default function App() {
 
   if (!user) {
     return (
-      <AuthLogin
-        brand={loginBrand}
-        showDefaultHint={showDefaultHint}
-        onSuccess={(loggedInUser) => {
-          setUser(loggedInUser);
-          setCachedUser(loggedInUser);
-        }}
-      />
+      <>
+        <AuthLogin
+          brand={loginBrand}
+          onModeChange={handleAuthModeChange}
+          forceSignInTick={forceSignInTick}
+          forceBillingTick={forceBillingTick}
+          initialBillingError={authBillingError}
+          onRequestBack={() => handleBackAction(false)}
+          onSuccess={(loggedInUser) => {
+            setAuthBillingError('');
+            setUser(loggedInUser);
+            setCachedUser(loggedInUser);
+            authModeRef.current = 'billing';
+            resetNavigationRoot(
+              loggedInUser.role === 'Administrator' ? 'admin' : 'dashboard'
+            );
+          }}
+        />
+        {exitWarningBanner}
+      </>
     );
   }
 
-  const activeNavMeta = NAV_ITEMS.find((n) => n.id === activeNav) || NAV_ITEMS[0];
+  const isAdministrator = user.role === 'Administrator';
+  const visibleNavItems = isAdministrator
+    ? [{ id: 'admin' as NavSection, label: 'Admin Monitor', icon: ShieldAlert }, ...NAV_ITEMS]
+    : NAV_ITEMS;
+  const effectiveActiveNav: NavSection =
+    activeNav === 'admin' && !isAdministrator ? 'dashboard' : activeNav;
+  const activeNavMeta = visibleNavItems.find((n) => n.id === effectiveActiveNav) || visibleNavItems[0];
 
   return (
     <div className="min-h-screen bg-slate-50 flex">
@@ -1227,22 +1966,24 @@ export default function App() {
             />
           </div>
           <div className="min-w-0">
-            <p className="text-xs font-bold tracking-wider text-[#C89B3C] truncate">
-              STANLEY
+            <p className="text-[10px] font-bold tracking-wider text-[#C89B3C] truncate uppercase">
+              STANLEY BUSINESS MANAGER
             </p>
-            <p className="text-sm font-bold text-white truncate">Business Manager</p>
+            <p className="text-sm font-bold text-white truncate">
+              {data?.settings.business_name || 'My Business'}
+            </p>
           </div>
         </div>
 
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-          {NAV_ITEMS.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
-            const active = activeNav === item.id;
+            const active = effectiveActiveNav === item.id;
             return (
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setActiveNav(item.id)}
+                onClick={() => navigateTo(item.id)}
                 className={`w-full h-10 px-3 rounded-lg text-sm font-medium flex items-center gap-3 transition-colors cursor-pointer whitespace-nowrap ${
                   active
                     ? 'bg-[#132B52] text-[#C89B3C] font-semibold'
@@ -1272,7 +2013,7 @@ export default function App() {
               <Info className="w-4 h-4" />
             </button>
           </div>
-          <PWAInstallButton variant="sidebar" allowPackagingKit />
+          <PWAInstallButton variant="sidebar" />
           <button
             type="button"
             onClick={handleLogout}
@@ -1301,8 +2042,12 @@ export default function App() {
                   className="w-9 h-9 rounded-lg object-cover border border-amber-400/30"
                 />
                 <div className="min-w-0">
-                  <p className="text-[11px] font-bold text-[#C89B3C]">STANLEY</p>
-                  <p className="text-sm font-bold truncate">Business Manager</p>
+                  <p className="text-[10px] font-bold text-[#C89B3C] uppercase truncate">
+                    STANLEY BUSINESS MANAGER
+                  </p>
+                  <p className="text-sm font-bold truncate">
+                    {data?.settings.business_name || 'My Business'}
+                  </p>
                 </div>
               </div>
               <button
@@ -1315,15 +2060,15 @@ export default function App() {
             </div>
 
             <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
-              {NAV_ITEMS.map((item) => {
+              {visibleNavItems.map((item) => {
                 const Icon = item.icon;
-                const active = activeNav === item.id;
+                const active = effectiveActiveNav === item.id;
                 return (
                   <button
                     key={item.id}
                     type="button"
                     onClick={() => {
-                      setActiveNav(item.id);
+                      navigateTo(item.id);
                       setMobileMenuOpen(false);
                     }}
                     className={`w-full h-11 px-3 rounded-lg text-sm font-medium flex items-center gap-3 cursor-pointer ${
@@ -1340,7 +2085,7 @@ export default function App() {
             </nav>
 
             <div className="p-4 border-t border-white/10 space-y-2.5">
-              <PWAInstallButton variant="sidebar" allowPackagingKit />
+              <PWAInstallButton variant="sidebar" />
               <button
                 type="button"
                 onClick={() => {
@@ -1369,7 +2114,7 @@ export default function App() {
       <div className="flex-1 lg:pl-64 flex flex-col min-w-0">
         {/* Top Bar */}
         <header className="no-print sticky top-0 z-30 bg-white border-b border-slate-200 px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center gap-2.5 min-w-0">
             <button
               type="button"
               onClick={() => setMobileMenuOpen(true)}
@@ -1377,6 +2122,31 @@ export default function App() {
               className="lg:hidden h-10 w-10 rounded-lg border border-slate-200 flex items-center justify-center text-slate-700 hover:bg-slate-50 cursor-pointer shrink-0"
             >
               <Menu className="w-5 h-5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleBackAction(false)}
+              title={
+                navStackDepth > 1 ||
+                notificationsOpen ||
+                mobileMenuOpen ||
+                Boolean(activeReceipt) ||
+                aboutOpen ||
+                saleModalOpen ||
+                expenseModalOpen ||
+                customerModalOpen ||
+                orderModalOpen
+                  ? 'Go back to previous screen'
+                  : 'Double-click Back to exit application'
+              }
+              className={`h-9 px-2.5 rounded-lg border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                exitWarning
+                  ? 'bg-amber-50 border-amber-400 text-amber-900'
+                  : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+              }`}
+            >
+              <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
+              <span>Back</span>
             </button>
             <div className="min-w-0">
               <p className="text-xs text-slate-500 truncate">
@@ -1401,7 +2171,7 @@ export default function App() {
             {cloudUser && (
               <button
                 type="button"
-                onClick={() => setActiveNav('settings')}
+                onClick={() => navigateTo('settings')}
                 title={`Cloud Sync connected: ${cloudUser.email}`}
                 className="hidden sm:inline-flex h-9 px-3 rounded-lg border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-semibold items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
               >
@@ -1409,11 +2179,33 @@ export default function App() {
                 Cloud Ready
               </button>
             )}
-            <PWAInstallButton variant="header" autoOpenOnInstallParam allowPackagingKit />
+            <NotificationCenter
+              notifications={notifications}
+              unreadCount={unreadNotificationsCount}
+              isOpen={notificationsOpen}
+              onToggle={() => setNotificationsOpen((prev) => !prev)}
+              onClose={() => setNotificationsOpen(false)}
+              onMarkRead={(id) => void handleMarkNotificationRead(id)}
+              onMarkAllRead={() => void handleMarkAllNotificationsRead()}
+              onClearAll={() => void handleClearNotifications()}
+              onNotificationClick={(n) => {
+                setNotificationsOpen(false);
+                if (n.type === 'order') {
+                  navigateTo('orders');
+                } else if (n.type === 'billing') {
+                  navigateTo(isAdministrator ? 'admin' : 'settings');
+                } else if (n.type === 'login' && isAdministrator) {
+                  navigateTo('admin');
+                }
+              }}
+              browserPermission={browserPermission}
+              onEnableBrowserAlerts={() => void handleEnableBrowserAlerts()}
+            />
+            <PWAInstallButton variant="header" autoOpenOnInstallParam />
             <button
               type="button"
               onClick={() => {
-                setActiveNav('sales');
+                navigateTo('sales');
                 setSaleModalOpen(true);
               }}
               className="h-9 px-3.5 rounded-lg bg-[#0B1D3A] hover:bg-[#132B52] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
@@ -1426,7 +2218,9 @@ export default function App() {
 
         {/* Main Viewport */}
         <main className="flex-1 p-4 sm:p-6 max-w-[1440px] w-full mx-auto">
-          {loadingData && !data ? (
+          {effectiveActiveNav === 'admin' && isAdministrator ? (
+            <AdminMonitorView currentUser={user} onNotify={notify} />
+          ) : loadingData && !data ? (
             <div className="space-y-4">
               <div className="h-24 bg-white border border-slate-200 rounded-xl animate-pulse" />
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
@@ -1437,7 +2231,27 @@ export default function App() {
             </div>
           ) : data ? (
             <>
-              {activeNav === 'dashboard' && (
+              {isAdministrator && user.is_default_password && effectiveActiveNav !== 'settings' && (
+                <div className="no-print mb-5 p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center gap-2.5 text-xs text-amber-950">
+                    <KeyRound className="w-4 h-4 text-amber-700 shrink-0" />
+                    <span>
+                      <strong>Admin Security Notice:</strong> You are signed in with the initial
+                      administrator password. Update it in Settings &amp; Security to keep your
+                      admin workspace private.
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => navigateTo('settings')}
+                    className="h-8 px-3 rounded-lg bg-[#0B1D3A] text-white text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 self-start sm:self-auto"
+                  >
+                    Update Password
+                  </button>
+                </div>
+              )}
+
+              {effectiveActiveNav === 'dashboard' && (
                 <DashboardView
                   settings={data.settings}
                   sales={data.sales}
@@ -1445,12 +2259,12 @@ export default function App() {
                   orders={data.orders}
                   customers={data.customers}
                   onQuickAction={handleQuickAction}
-                  onNavigate={setActiveNav}
+                  onNavigate={navigateTo}
                   onViewReceipt={(sale) => setActiveReceipt(sale)}
                 />
               )}
 
-              {activeNav === 'sales' && (
+              {effectiveActiveNav === 'sales' && (
                 <SalesView
                   settings={data.settings}
                   sales={data.sales}
@@ -1466,7 +2280,7 @@ export default function App() {
                 />
               )}
 
-              {activeNav === 'expenses' && (
+              {effectiveActiveNav === 'expenses' && (
                 <ExpensesView
                   settings={data.settings}
                   expenses={data.expenses}
@@ -1479,18 +2293,18 @@ export default function App() {
                 />
               )}
 
-              {activeNav === 'receipts' && (
+              {effectiveActiveNav === 'receipts' && (
                 <ReceiptsView
                   settings={data.settings}
                   sales={data.sales}
                   onCreateSaleClick={() => {
-                    setActiveNav('sales');
+                    navigateTo('sales');
                     setSaleModalOpen(true);
                   }}
                 />
               )}
 
-              {activeNav === 'orders' && (
+              {effectiveActiveNav === 'orders' && (
                 <OrdersView
                   settings={data.settings}
                   orders={data.orders}
@@ -1504,7 +2318,7 @@ export default function App() {
                 />
               )}
 
-              {activeNav === 'products' && (
+              {effectiveActiveNav === 'products' && (
                 <ProductsView
                   settings={data.settings}
                   products={data.products}
@@ -1513,7 +2327,7 @@ export default function App() {
                 />
               )}
 
-              {activeNav === 'customers' && (
+              {effectiveActiveNav === 'customers' && (
                 <CustomersView
                   settings={data.settings}
                   customers={data.customers}
@@ -1528,7 +2342,7 @@ export default function App() {
                 />
               )}
 
-              {activeNav === 'analytics' && (
+              {effectiveActiveNav === 'analytics' && (
                 <AnalyticsView
                   settings={data.settings}
                   sales={data.sales}
@@ -1537,7 +2351,7 @@ export default function App() {
                 />
               )}
 
-              {activeNav === 'reports' && (
+              {effectiveActiveNav === 'reports' && (
                 <ReportsView
                   settings={data.settings}
                   sales={data.sales}
@@ -1546,7 +2360,7 @@ export default function App() {
                 />
               )}
 
-              {activeNav === 'settings' && (
+              {effectiveActiveNav === 'settings' && (
                 <SettingsView
                   settings={data.settings}
                   user={user}
@@ -1589,6 +2403,17 @@ export default function App() {
         />
       )}
 
+      {/* First-Time Business Profile Setup Modal (e.g. new Google Sign-In workspaces) */}
+      {data && !data.settings.profile_completed && (
+        <BusinessProfileSetupModal
+          user={user}
+          settings={data.settings}
+          onSaveSettings={handleSaveSettings}
+          onSignOut={() => void handleLogout()}
+          onNotify={notify}
+        />
+      )}
+
       {/* About & Shortcuts Modal */}
       {data && (
         <AboutModal
@@ -1611,6 +2436,37 @@ export default function App() {
         </div>
       )}
 
+      {/* Live Login / New Order Alert Pop-up */}
+      {liveAlert && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="no-print fixed top-20 right-4 sm:right-6 z-50 w-[calc(100vw-32px)] sm:w-96 bg-[#0B1D3A] text-white rounded-xl border border-[#C89B3C] shadow-2xl p-3.5 flex items-start gap-3"
+        >
+          <div className="w-8 h-8 rounded-lg bg-[#C89B3C]/20 text-[#C89B3C] flex items-center justify-center shrink-0 mt-0.5">
+            {liveAlert.type === 'order' ? (
+              <ClipboardList className="w-4 h-4" />
+            ) : liveAlert.type === 'billing' ? (
+              <CreditCard className="w-4 h-4" />
+            ) : (
+              <ShieldAlert className="w-4 h-4" />
+            )}
+          </div>
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <p className="text-xs font-bold text-[#C89B3C]">{liveAlert.title}</p>
+            <p className="text-xs text-slate-100 leading-snug break-words">{liveAlert.message}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setLiveAlert(null)}
+            aria-label="Dismiss notification"
+            className="p-1 rounded-md text-slate-300 hover:text-white hover:bg-white/10 cursor-pointer shrink-0"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        </div>
+      )}
+
       {/* Toast Notification */}
       {toast && (
         <div
@@ -1624,6 +2480,8 @@ export default function App() {
           {toast.message}
         </div>
       )}
+
+      {exitWarningBanner}
     </div>
   );
 }

@@ -1,9 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { signInWithPopup } from 'firebase/auth';
 import {
   ArrowLeft,
+  Building2,
   Check,
   Copy,
+  CreditCard,
   Download,
   Eye,
   EyeOff,
@@ -13,9 +15,10 @@ import {
   ShieldCheck,
   UserPlus,
 } from 'lucide-react';
-import { auth, googleProvider } from '../firebase';
-import { UserProfile } from '../types';
+import { appleProvider, auth, googleProvider } from '../firebase';
+import { BillingSubscription, UserProfile } from '../types';
 import { apiRequest, setStoredToken } from '../utils/api';
+import { BILLING_PASS_STORAGE_KEY, BillingGate } from './BillingGate';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface AuthLoginProps {
@@ -24,12 +27,16 @@ interface AuthLoginProps {
     logo_url: string;
     location: string;
   };
-  showDefaultHint: boolean;
   onSuccess: (user: UserProfile) => void;
+  onModeChange?: (mode: 'billing' | 'signin' | 'register' | 'forgot') => void;
+  forceSignInTick?: number;
+  forceBillingTick?: number;
+  initialBillingError?: string;
+  onRequestBack?: () => void;
 }
 
 type AuthMode = 'signin' | 'register' | 'forgot';
-type ResetMethod = 'google' | 'security_question' | 'recovery_key';
+type ResetMethod = 'google' | 'icloud' | 'security_question' | 'recovery_key';
 
 interface LookupResult {
   found: boolean;
@@ -38,6 +45,7 @@ interface LookupResult {
   securityQuestion: string | null;
   hasRecoveryKey: boolean;
   canVerifyWithGoogle: boolean;
+  canVerifyWithICloud?: boolean;
 }
 
 const SECURITY_QUESTIONS = [
@@ -69,23 +77,46 @@ const GoogleLogoIcon = () => (
   </svg>
 );
 
+const AppleLogoIcon = () => (
+  <svg className="w-4 h-4 shrink-0 fill-current" viewBox="0 0 24 24" aria-hidden="true">
+    <path d="M17.05 20.28c-.98.95-2.05.8-3.08.35-1.09-.46-2.09-.48-3.24 0-1.44.62-2.2.44-3.06-.35C2.79 15.25 3.51 7.59 9.05 7.31c1.35.07 2.29.74 3.08.8 1.18-.24 2.31-.93 3.57-.84 1.51.12 2.65.72 3.4 1.8-3.12 1.87-2.38 5.98.48 7.13-.57 1.5-1.31 2.99-2.54 4.09l.01-.01ZM12.03 7.25c-.15-2.23 1.66-4.07 3.74-4.25.29 2.58-2.34 4.5-3.74 4.25Z" />
+  </svg>
+);
+
 export const AuthLogin: React.FC<AuthLoginProps> = ({
   brand,
-  showDefaultHint,
   onSuccess,
+  onModeChange,
+  forceSignInTick = 0,
+  forceBillingTick = 0,
+  initialBillingError = '',
+  onRequestBack,
 }) => {
+  const [step, setStep] = useState<'billing' | 'auth'>('billing');
   const [mode, setMode] = useState<AuthMode>('signin');
+  const [activeBillingPass, setActiveBillingPass] = useState<{
+    passCode: string;
+    subscription: BillingSubscription;
+  } | null>(null);
+  const [renewalMode, setRenewalMode] = useState(Boolean(initialBillingError));
+  const [billingNotice, setBillingNotice] = useState(initialBillingError);
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [icloudLoading, setIcloudLoading] = useState(false);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
 
-  // Sign In State
-  const [identifier, setIdentifier] = useState(showDefaultHint ? 'admin' : '');
+  // Sign In State (never prefilled with default admin credentials)
+  const [identifier, setIdentifier] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
-  // Register State
+  // Register State (includes Business Profile creation)
+  const [regBusinessName, setRegBusinessName] = useState('');
+  const [regTagline, setRegTagline] = useState('');
+  const [regPhone, setRegPhone] = useState('');
+  const [regLocation, setRegLocation] = useState('');
+  const [regCurrency, setRegCurrency] = useState('UGX');
   const [regName, setRegName] = useState('');
   const [regUsername, setRegUsername] = useState('');
   const [regEmail, setRegEmail] = useState('');
@@ -110,13 +141,107 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
   const [resetConfirmPassword, setResetConfirmPassword] = useState('');
   const [showResetPassword, setShowResetPassword] = useState(false);
 
+  const clearStoredBillingPass = () => {
+    try {
+      localStorage.removeItem(BILLING_PASS_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+  };
+
+  const openBillingStep = (opts?: { renewal?: boolean; notice?: string }) => {
+    setRenewalMode(Boolean(opts?.renewal));
+    setBillingNotice(opts?.notice || '');
+    setStep('billing');
+    setError('');
+    setSuccessMsg('');
+    onModeChange?.('billing');
+  };
+
   const switchMode = (next: AuthMode) => {
+    setStep('auth');
     setMode(next);
     setError('');
     setSuccessMsg('');
     if (next !== 'forgot') {
       setLookupResult(null);
     }
+    onModeChange?.(next);
+  };
+
+  useEffect(() => {
+    onModeChange?.('billing');
+    try {
+      const savedPass = localStorage.getItem(BILLING_PASS_STORAGE_KEY);
+      if (savedPass) {
+        void apiRequest<{
+          valid: boolean;
+          claimed: boolean;
+          subscription: BillingSubscription;
+        }>(`/api/billing/pass/${encodeURIComponent(savedPass)}`)
+          .then((res) => {
+            if (res.valid && !res.claimed) {
+              setActiveBillingPass({
+                passCode: res.subscription.pass_code,
+                subscription: res.subscription,
+              });
+            } else {
+              clearStoredBillingPass();
+            }
+          })
+          .catch(() => {
+            clearStoredBillingPass();
+          });
+      }
+    } catch {
+      // ignore storage failures
+    }
+  }, [onModeChange]);
+
+  useEffect(() => {
+    if (initialBillingError) {
+      setRenewalMode(true);
+      setBillingNotice(initialBillingError);
+      setStep('billing');
+      onModeChange?.('billing');
+    }
+  }, [initialBillingError, onModeChange]);
+
+  useEffect(() => {
+    if (forceSignInTick > 0) {
+      setStep('auth');
+      setMode('signin');
+      setError('');
+      setSuccessMsg('');
+      setLookupResult(null);
+      onModeChange?.('signin');
+    }
+  }, [forceSignInTick, onModeChange]);
+
+  useEffect(() => {
+    if (forceBillingTick > 0) {
+      setStep('billing');
+      setError('');
+      setSuccessMsg('');
+      setLookupResult(null);
+      onModeChange?.('billing');
+    }
+  }, [forceBillingTick, onModeChange]);
+
+  const handleBillingErrorRedirect = (err: any): boolean => {
+    if (err?.status === 402 || err?.code === 'BILLING_PASS_REQUIRED' || err?.code === 'SUBSCRIPTION_REQUIRED') {
+      const isRenewal = err?.code === 'SUBSCRIPTION_REQUIRED';
+      if (!isRenewal) {
+        setActiveBillingPass(null);
+        clearStoredBillingPass();
+      }
+      openBillingStep({
+        renewal: isRenewal,
+        notice: err?.message || 'Please activate a billing plan or pay via Airtel/MTN Mobile Money to continue.',
+      });
+      return true;
+    }
+    return false;
   };
 
   const handleGoogleSignIn = async () => {
@@ -128,11 +253,16 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
       const idToken = await cred.user.getIdToken();
       const res = await apiRequest<{ token: string; user: UserProfile }>('/api/auth/google', {
         method: 'POST',
-        body: JSON.stringify({ idToken }),
+        body: JSON.stringify({
+          idToken,
+          billingPassCode: activeBillingPass?.passCode,
+        }),
       });
+      clearStoredBillingPass();
       setStoredToken(res.token);
       onSuccess(res.user);
     } catch (err: any) {
+      if (handleBillingErrorRedirect(err)) return;
       if (err?.code === 'auth/popup-closed-by-user') {
         setError('Google Sign-In window was closed before completing.');
       } else if (err?.code === 'auth/popup-blocked') {
@@ -145,6 +275,49 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
     }
   };
 
+  const handleICloudSignIn = async () => {
+    setError('');
+    setSuccessMsg('');
+    setIcloudLoading(true);
+    try {
+      const cred = await signInWithPopup(auth, appleProvider);
+      const idToken = await cred.user.getIdToken();
+      const res = await apiRequest<{ token: string; user: UserProfile }>('/api/auth/icloud', {
+        method: 'POST',
+        body: JSON.stringify({
+          idToken,
+          displayName: cred.user.displayName || undefined,
+          billingPassCode: activeBillingPass?.passCode,
+        }),
+      });
+      clearStoredBillingPass();
+      setStoredToken(res.token);
+      onSuccess(res.user);
+    } catch (err: any) {
+      if (handleBillingErrorRedirect(err)) return;
+      if (err?.code === 'auth/popup-closed-by-user') {
+        setError('iCloud Sign-In window was closed before completing.');
+      } else if (err?.code === 'auth/popup-blocked') {
+        setError('Pop-up was blocked by your browser. Please allow pop-ups and try again.');
+      } else if (
+        err?.code === 'auth/operation-not-allowed' ||
+        err?.code === 'auth/configuration-not-found'
+      ) {
+        setError(
+          'iCloud / Apple Sign-In is not enabled yet in Firebase Console (Authentication → Sign-in method → Apple).'
+        );
+      } else if (err?.code === 'auth/account-exists-with-different-credential') {
+        setError(
+          'An account with this email already exists using another sign-in method. Please sign in with Google or your password.'
+        );
+      } else {
+        setError(err.message || 'iCloud Sign-In failed. Please try again.');
+      }
+    } finally {
+      setIcloudLoading(false);
+    }
+  };
+
   const handleSignInSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -153,11 +326,17 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
     try {
       const res = await apiRequest<{ token: string; user: UserProfile }>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ identifier, password }),
+        body: JSON.stringify({
+          identifier,
+          password,
+          billingPassCode: activeBillingPass?.passCode,
+        }),
       });
+      clearStoredBillingPass();
       setStoredToken(res.token);
       onSuccess(res.user);
     } catch (err: any) {
+      if (handleBillingErrorRedirect(err)) return;
       setError(err.message || 'Sign in failed. Please check your credentials.');
     } finally {
       setLoading(false);
@@ -168,6 +347,10 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
     e.preventDefault();
     setError('');
     setSuccessMsg('');
+    if (regBusinessName.trim().length < 2) {
+      setError('Please enter your business name (at least 2 characters).');
+      return;
+    }
     if (regPassword !== regConfirmPassword) {
       setError('Passwords do not match.');
       return;
@@ -186,18 +369,26 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
       }>('/api/auth/register', {
         method: 'POST',
         body: JSON.stringify({
+          business_name: regBusinessName.trim(),
+          tagline: regTagline.trim(),
+          phone_primary: regPhone.trim(),
+          location: regLocation.trim(),
+          currency: regCurrency,
           full_name: regName.trim(),
           username: regUsername.trim(),
           email: regEmail.trim(),
           password: regPassword,
           security_question: regQuestion,
           security_answer: regAnswer.trim(),
+          billingPassCode: activeBillingPass?.passCode,
         }),
       });
+      clearStoredBillingPass();
       setStoredToken(res.token);
       setPendingSessionUser(res.user);
       setIssuedRecoveryKey(res.recoveryKey);
     } catch (err: any) {
+      if (handleBillingErrorRedirect(err)) return;
       setError(err.message || 'Could not create account.');
     } finally {
       setLoading(false);
@@ -248,6 +439,9 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
       if (resetMethod === 'google') {
         const cred = await signInWithPopup(auth, googleProvider);
         idToken = await cred.user.getIdToken();
+      } else if (resetMethod === 'icloud') {
+        const cred = await signInWithPopup(auth, appleProvider);
+        idToken = await cred.user.getIdToken();
       }
 
       const res = await apiRequest<{
@@ -276,7 +470,14 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
       }
     } catch (err: any) {
       if (err?.code === 'auth/popup-closed-by-user') {
-        setError('Google verification was cancelled.');
+        setError('Verification pop-up was cancelled.');
+      } else if (
+        err?.code === 'auth/operation-not-allowed' ||
+        err?.code === 'auth/configuration-not-found'
+      ) {
+        setError(
+          'Apple / iCloud verification is not enabled yet in Firebase Console (Authentication → Sign-in method → Apple).'
+        );
       } else {
         setError(err.message || 'Password reset failed.');
       }
@@ -320,16 +521,56 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  const fillDemoCredentials = () => {
-    setIdentifier('admin');
-    setPassword('stanley2026');
-    setError('');
-  };
+  if (step === 'billing' && !(pendingSessionUser && issuedRecoveryKey)) {
+    return (
+      <BillingGate
+        brand={brand}
+        initialMessage={billingNotice}
+        renewalMode={renewalMode}
+        existingPass={activeBillingPass}
+        onRequestBack={onRequestBack}
+        onProceedToSignIn={() => {
+          setRenewalMode(false);
+          switchMode('signin');
+        }}
+        onPlanUnlocked={(passCode, subscription, nextAuthMode) => {
+          setActiveBillingPass({ passCode, subscription });
+          setBillingNotice('');
+          switchMode(nextAuthMode);
+          if (nextAuthMode === 'signin') {
+            setSuccessMsg(
+              `${subscription.plan_name} pass (${passCode}) ready. Sign in to activate your workspace.`
+            );
+          } else {
+            setSuccessMsg(
+              `${subscription.plan_name} activated (${passCode}). Create your business account or continue with Google / iCloud below.`
+            );
+          }
+        }}
+      />
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#0B1D3A] flex flex-col justify-center items-center p-4 sm:p-6">
       <div className="w-full max-w-md bg-white rounded-xl border border-slate-200 overflow-hidden shadow-2xl">
-        <div className="bg-[#0B1D3A] px-6 py-6 text-center border-b-4 border-[#C89B3C]">
+        <div className="relative bg-[#0B1D3A] px-6 py-6 text-center border-b-4 border-[#C89B3C]">
+          <button
+            type="button"
+            onClick={() => {
+              if (mode === 'forgot') {
+                switchMode('signin');
+              } else {
+                openBillingStep();
+              }
+            }}
+            aria-label="Back"
+            title={mode === 'forgot' ? 'Back to Sign In' : 'Back to Billing Plans'}
+            className="absolute top-3.5 left-3.5 h-8 px-2.5 rounded-lg bg-white/10 hover:bg-white/20 text-slate-100 text-xs font-medium inline-flex items-center gap-1 transition-colors cursor-pointer whitespace-nowrap"
+          >
+            <ArrowLeft className="w-3.5 h-3.5 shrink-0" />
+            <span>Back</span>
+          </button>
           <div className="w-16 h-16 mx-auto mb-3 rounded-xl overflow-hidden border border-amber-400/30 bg-[#0B1D3A] flex items-center justify-center">
             <img
               src={brand.logo_url}
@@ -342,7 +583,7 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
             STANLEY BUSINESS MANAGER
           </h1>
           <p className="mt-1 text-xs text-amber-300/90 font-medium">
-            {brand.business_name} · {brand.location || 'Uganda'}
+            {brand.location || 'Create your own business workspace or sign in'}
           </p>
         </div>
 
@@ -352,7 +593,7 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
             <div className="space-y-1">
               <div className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700">
                 <ShieldCheck className="w-4 h-4" />
-                Account Ready
+                Business Workspace Ready
               </div>
               <h2 className="text-lg font-bold text-slate-900">Save Your Personal Recovery Key</h2>
               <p className="text-xs text-slate-600 leading-relaxed">
@@ -445,6 +686,43 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
               </button>
             )}
 
+            {activeBillingPass ? (
+              <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-2 text-xs">
+                <div className="min-w-0">
+                  <p className="font-bold text-emerald-900 truncate">
+                    {activeBillingPass.subscription.plan_name}
+                    {activeBillingPass.subscription.amount_ugx > 0
+                      ? ` · UGX ${activeBillingPass.subscription.amount_ugx.toLocaleString('en-US')}`
+                      : ' · Free 24h Trial'}
+                  </p>
+                  <p className="text-[11px] font-mono text-emerald-800 truncate">
+                    Pass: {activeBillingPass.passCode}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openBillingStep()}
+                  className="text-xs font-semibold text-[#0B1D3A] underline cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Change Plan
+                </button>
+              </div>
+            ) : mode === 'register' ? (
+              <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 text-amber-950">
+                  <CreditCard className="w-4 h-4 text-amber-700 shrink-0" />
+                  <span>Select a 24h Trial, 1 Month, or 1 Year plan before registering.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openBillingStep()}
+                  className="h-7 px-2.5 rounded-md bg-[#0B1D3A] text-white text-[11px] font-semibold cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  Choose Plan
+                </button>
+              </div>
+            ) : null}
+
             {error && (
               <div className="p-3 rounded-lg bg-red-50 border border-red-200 text-xs text-red-700">
                 {error}
@@ -463,20 +741,32 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                 <div>
                   <h2 className="text-lg font-semibold text-slate-900">Sign In to Workspace</h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Access your studio sales, receipts, orders, and cloud backups.
+                    Access your business sales, receipts, orders, and cloud backups.
                   </p>
                 </div>
 
-                {/* Continue with Google */}
-                <button
-                  type="button"
-                  disabled={googleLoading || loading}
-                  onClick={handleGoogleSignIn}
-                  className="w-full h-11 px-4 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-semibold text-sm flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60 cursor-pointer"
-                >
-                  <GoogleLogoIcon />
-                  <span>{googleLoading ? 'Connecting to Google...' : 'Continue with Google'}</span>
-                </button>
+                {/* Continue with Google & iCloud */}
+                <div className="space-y-2.5">
+                  <button
+                    type="button"
+                    disabled={googleLoading || icloudLoading || loading}
+                    onClick={handleGoogleSignIn}
+                    className="w-full h-11 px-4 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-semibold text-sm flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60 cursor-pointer"
+                  >
+                    <GoogleLogoIcon />
+                    <span>{googleLoading ? 'Connecting to Google...' : 'Continue with Google'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={icloudLoading || googleLoading || loading}
+                    onClick={handleICloudSignIn}
+                    className="w-full h-11 px-4 rounded-lg border border-slate-900 bg-slate-950 hover:bg-slate-900 text-white font-semibold text-sm flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60 cursor-pointer"
+                  >
+                    <AppleLogoIcon />
+                    <span>{icloudLoading ? 'Connecting to iCloud...' : 'Continue with iCloud'}</span>
+                  </button>
+                </div>
 
                 <div className="relative flex items-center py-0.5">
                   <div className="flex-grow border-t border-slate-200" />
@@ -485,25 +775,6 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                   </span>
                   <div className="flex-grow border-t border-slate-200" />
                 </div>
-
-                {showDefaultHint && (
-                  <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-slate-700 space-y-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold text-slate-900">Initial Studio Admin</span>
-                      <button
-                        type="button"
-                        onClick={fillDemoCredentials}
-                        className="text-xs font-semibold text-[#0B1D3A] underline hover:text-amber-700 cursor-pointer"
-                      >
-                        Auto-fill
-                      </button>
-                    </div>
-                    <p className="font-mono text-slate-600">
-                      User: <strong className="text-slate-900">admin</strong> · Pass:{' '}
-                      <strong className="text-slate-900">stanley2026</strong>
-                    </p>
-                  </div>
-                )}
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1.5">
@@ -514,7 +785,7 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                     required
                     value={identifier}
                     onChange={(e) => setIdentifier(e.target.value)}
-                    placeholder="admin or mpangastanley04@gmail.com"
+                    placeholder="Enter your username or email"
                     className="w-full h-10 px-3.5 rounded-lg border border-slate-300 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#C89B3C]/40 focus:border-[#0B1D3A]"
                   />
                 </div>
@@ -568,28 +839,114 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
             {mode === 'register' && (
               <form onSubmit={handleRegisterSubmit} className="space-y-3.5">
                 <div>
-                  <h2 className="text-lg font-semibold text-slate-900">Create Account</h2>
+                  <h2 className="text-lg font-semibold text-slate-900">Create Your Business Account</h2>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Register a team member account or connect instantly with Google.
+                    Set up your own private business profile — or sign up instantly with Google.
                   </p>
                 </div>
 
-                <button
-                  type="button"
-                  disabled={googleLoading || loading}
-                  onClick={handleGoogleSignIn}
-                  className="w-full h-10 px-4 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-semibold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer"
-                >
-                  <GoogleLogoIcon />
-                  <span>{googleLoading ? 'Connecting to Google...' : 'Sign up with Google'}</span>
-                </button>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    disabled={googleLoading || icloudLoading || loading}
+                    onClick={handleGoogleSignIn}
+                    className="w-full h-10 px-3 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-semibold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer whitespace-nowrap"
+                  >
+                    <GoogleLogoIcon />
+                    <span>{googleLoading ? 'Connecting...' : 'Sign up with Google'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={icloudLoading || googleLoading || loading}
+                    onClick={handleICloudSignIn}
+                    className="w-full h-10 px-3 rounded-lg border border-slate-900 bg-slate-950 hover:bg-slate-900 text-white font-semibold text-xs flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer whitespace-nowrap"
+                  >
+                    <AppleLogoIcon />
+                    <span>{icloudLoading ? 'Connecting...' : 'Sign up with iCloud'}</span>
+                  </button>
+                </div>
 
                 <div className="relative flex items-center py-0.5">
                   <div className="flex-grow border-t border-slate-200" />
                   <span className="shrink mx-3 text-[11px] font-medium text-slate-400 uppercase tracking-wider">
-                    or create local account
+                    or create business profile
                   </span>
                   <div className="flex-grow border-t border-slate-200" />
+                </div>
+
+                {/* Business Profile Section */}
+                <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 space-y-2.5">
+                  <p className="text-[11px] font-semibold text-slate-700 flex items-center gap-1.5">
+                    <Building2 className="w-3.5 h-3.5 text-[#0B1D3A]" />
+                    Your Business Profile
+                  </p>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Business / Company Name *
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={regBusinessName}
+                      onChange={(e) => setRegBusinessName(e.target.value)}
+                      placeholder="e.g. Kampala Creative Prints"
+                      className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Business Type / Services
+                    </label>
+                    <input
+                      type="text"
+                      value={regTagline}
+                      onChange={(e) => setRegTagline(e.target.value)}
+                      placeholder="e.g. Printing, Retail Shop, Salon, Consultancy"
+                      className="w-full h-9 px-3 rounded-lg border border-slate-300 bg-white text-sm"
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Phone
+                      </label>
+                      <input
+                        type="text"
+                        value={regPhone}
+                        onChange={(e) => setRegPhone(e.target.value)}
+                        placeholder="+256 7XX..."
+                        className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Location
+                      </label>
+                      <input
+                        type="text"
+                        value={regLocation}
+                        onChange={(e) => setRegLocation(e.target.value)}
+                        placeholder="Kampala"
+                        className="w-full h-9 px-2.5 rounded-lg border border-slate-300 bg-white text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Currency
+                      </label>
+                      <select
+                        value={regCurrency}
+                        onChange={(e) => setRegCurrency(e.target.value)}
+                        className="w-full h-9 px-2 rounded-lg border border-slate-300 bg-white text-xs font-mono"
+                      >
+                        <option value="UGX">UGX</option>
+                        <option value="USD">USD</option>
+                        <option value="KES">KES</option>
+                        <option value="TZS">TZS</option>
+                      </select>
+                    </div>
+                  </div>
                 </div>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -630,7 +987,7 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                     required
                     value={regEmail}
                     onChange={(e) => setRegEmail(e.target.value)}
-                    placeholder="name@company.com"
+                    placeholder="name@business.com"
                     className="w-full h-9 px-3 rounded-lg border border-slate-300 text-sm"
                   />
                 </div>
@@ -709,7 +1066,7 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                   className="w-full h-10 rounded-lg bg-[#0B1D3A] hover:bg-[#132B52] text-white font-semibold text-sm flex items-center justify-center gap-2 transition-colors disabled:opacity-60 cursor-pointer"
                 >
                   <UserPlus className="w-4 h-4 text-[#C89B3C]" />
-                  <span>{loading ? 'Creating Account...' : 'Create Account'}</span>
+                  <span>{loading ? 'Creating Business Workspace...' : 'Create Business Account'}</span>
                 </button>
               </form>
             )}
@@ -735,7 +1092,7 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                         required
                         value={forgotIdentifier}
                         onChange={(e) => setForgotIdentifier(e.target.value)}
-                        placeholder="e.g. admin or mpangastanley04@gmail.com"
+                        placeholder="e.g. your username or name@business.com"
                         className="w-full h-10 px-3.5 rounded-lg border border-slate-300 text-sm"
                       />
                     </div>
@@ -772,7 +1129,7 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                       <label className="block text-xs font-semibold text-slate-700">
                         Choose Verification Method
                       </label>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                         {lookupResult.canVerifyWithGoogle && (
                           <button
                             type="button"
@@ -784,6 +1141,19 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                             }`}
                           >
                             Google Account
+                          </button>
+                        )}
+                        {lookupResult.canVerifyWithICloud && (
+                          <button
+                            type="button"
+                            onClick={() => setResetMethod('icloud')}
+                            className={`h-9 px-2.5 rounded-lg border text-xs font-semibold cursor-pointer ${
+                              resetMethod === 'icloud'
+                                ? 'bg-[#0B1D3A] text-white border-[#0B1D3A]'
+                                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                            }`}
+                          >
+                            iCloud / Apple ID
                           </button>
                         )}
                         {lookupResult.hasSecurityQuestion && (
@@ -820,6 +1190,14 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                         Enter your new password below, then click{' '}
                         <strong>Verify with Google &amp; Reset</strong> to sign in with the Google
                         account matching <strong>{lookupResult.maskedEmail}</strong>.
+                      </div>
+                    )}
+
+                    {resetMethod === 'icloud' && (
+                      <div className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-xs text-slate-700">
+                        Enter your new password below, then click{' '}
+                        <strong>Verify with iCloud &amp; Reset</strong> to authenticate with your
+                        Apple / iCloud ID matching <strong>{lookupResult.maskedEmail}</strong>.
                       </div>
                     )}
 
@@ -905,6 +1283,11 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
                           <GoogleLogoIcon />
                           <span>{loading ? 'Verifying...' : 'Verify with Google & Reset Password'}</span>
                         </>
+                      ) : resetMethod === 'icloud' ? (
+                        <>
+                          <AppleLogoIcon />
+                          <span>{loading ? 'Verifying...' : 'Verify with iCloud & Reset Password'}</span>
+                        </>
                       ) : (
                         <>
                           <KeyRound className="w-4 h-4 text-[#C89B3C]" />
@@ -921,7 +1304,7 @@ export const AuthLogin: React.FC<AuthLoginProps> = ({
 
             <div className="pt-2 border-t border-slate-100 flex items-center justify-center gap-2 text-xs text-slate-500">
               <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              <span>Protected local SQLite persistence &amp; Google Auth verification</span>
+              <span>Private per-business workspaces · Google &amp; iCloud Sign-In</span>
             </div>
           </div>
         )}

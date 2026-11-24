@@ -41,14 +41,17 @@ export async function apiRequest<T = any>(
 
   if (!res.ok) {
     let message = `Request failed (${res.status})`;
+    let data: any = null;
     try {
-      const data = await res.json();
+      data = await res.json();
       if (data?.error) message = data.error;
     } catch {
       // ignore json parse error
     }
-    const error = new Error(message) as Error & { status?: number };
+    const error = new Error(message) as Error & { status?: number; code?: string; data?: any };
     error.status = res.status;
+    if (data?.code) error.code = String(data.code);
+    if (data) error.data = data;
     throw error;
   }
 

@@ -8,7 +8,7 @@ export const DEFAULT_LOGO_URL = '/src/assets/images/stanley_brand_logo_179517181
 const DATA_DIR = process.env.STANLEY_DATA_DIR
   ? path.resolve(process.env.STANLEY_DATA_DIR)
   : path.resolve(process.cwd(), 'data');
-const DB_PATH = path.join(DATA_DIR, 'stanley_business.db');
+export const DB_PATH = path.join(DATA_DIR, 'stanley_business.db');
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -41,6 +41,34 @@ export function generateRecoveryKey(): string {
   return `SBM-${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}`;
 }
 
+export function generateBillingPassCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = crypto.randomBytes(8);
+  let raw = '';
+  for (let i = 0; i < 8; i++) {
+    raw += chars[bytes[i] % chars.length];
+  }
+  return `SBM-PAY-${raw.slice(0, 4)}-${raw.slice(4, 8)}`;
+}
+
+export function suggestReceiptPrefix(businessName: string): string {
+  const words = String(businessName || '')
+    .replace(/[^a-zA-Z0-9\s]/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (words.length >= 2) {
+    return words
+      .slice(0, 4)
+      .map((w) => w[0].toUpperCase())
+      .join('');
+  }
+  if (words.length === 1) {
+    return words[0].slice(0, 3).toUpperCase() || 'BIZ';
+  }
+  return 'BIZ';
+}
+
 export function initDatabase(): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -48,12 +76,14 @@ export function initDatabase(): void {
       username TEXT NOT NULL UNIQUE,
       full_name TEXT NOT NULL,
       email TEXT NOT NULL,
-      role TEXT NOT NULL DEFAULT 'Administrator',
+      role TEXT NOT NULL DEFAULT 'Business Owner',
       password_hash TEXT NOT NULL,
       password_salt TEXT NOT NULL,
-      is_default_password INTEGER NOT NULL DEFAULT 1,
+      is_default_password INTEGER NOT NULL DEFAULT 0,
       auth_provider TEXT NOT NULL DEFAULT 'local',
       google_uid TEXT,
+      icloud_uid TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
       security_question TEXT NOT NULL DEFAULT '',
       recovery_answer_hash TEXT NOT NULL DEFAULT '',
       recovery_answer_salt TEXT NOT NULL DEFAULT '',
@@ -71,8 +101,76 @@ export function initDatabase(): void {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS login_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      identifier TEXT NOT NULL DEFAULT '',
+      username TEXT NOT NULL DEFAULT '',
+      full_name TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      auth_method TEXT NOT NULL DEFAULT 'local',
+      status TEXT NOT NULL DEFAULT 'success',
+      failure_reason TEXT NOT NULL DEFAULT '',
+      ip_address TEXT NOT NULL DEFAULT '',
+      user_agent TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS system_audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      actor_user_id INTEGER,
+      actor_username TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL,
+      target_type TEXT NOT NULL DEFAULT '',
+      target_id TEXT NOT NULL DEFAULT '',
+      details TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS notifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target_user_id INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      message TEXT NOT NULL,
+      actor_user_id INTEGER,
+      actor_name TEXT NOT NULL DEFAULT '',
+      related_entity_type TEXT NOT NULL DEFAULT '',
+      related_entity_id TEXT NOT NULL DEFAULT '',
+      is_read INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (target_user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS billing_subscriptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      pass_code TEXT NOT NULL UNIQUE,
+      user_id INTEGER,
+      plan_code TEXT NOT NULL,
+      plan_name TEXT NOT NULL,
+      amount_ugx INTEGER NOT NULL DEFAULT 0,
+      payment_provider TEXT NOT NULL,
+      recipient_number TEXT NOT NULL DEFAULT '',
+      payer_phone TEXT NOT NULL DEFAULT '',
+      payer_name TEXT NOT NULL DEFAULT '',
+      transaction_id TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      starts_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      reviewed_by_user_id INTEGER,
+      reviewed_at TEXT,
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL,
+      FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+    );
+
     CREATE TABLE IF NOT EXISTS business_settings (
-      id INTEGER PRIMARY KEY CHECK (id = 1),
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_user_id INTEGER NOT NULL UNIQUE,
       business_name TEXT NOT NULL,
       tagline TEXT NOT NULL DEFAULT '',
       logo_url TEXT NOT NULL DEFAULT '',
@@ -87,11 +185,13 @@ export function initDatabase(): void {
       receipt_prefix TEXT NOT NULL DEFAULT 'SBM',
       next_receipt_seq INTEGER NOT NULL DEFAULT 1,
       inactivity_timeout_minutes INTEGER NOT NULL DEFAULT 15,
+      profile_completed INTEGER NOT NULL DEFAULT 1,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
     CREATE TABLE IF NOT EXISTS products (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_user_id INTEGER NOT NULL DEFAULT 1,
       name TEXT NOT NULL,
       category TEXT NOT NULL,
       description TEXT NOT NULL DEFAULT '',
@@ -106,6 +206,7 @@ export function initDatabase(): void {
 
     CREATE TABLE IF NOT EXISTS customers (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_user_id INTEGER NOT NULL DEFAULT 1,
       name TEXT NOT NULL,
       phone TEXT NOT NULL DEFAULT '',
       email TEXT NOT NULL DEFAULT '',
@@ -118,7 +219,8 @@ export function initDatabase(): void {
 
     CREATE TABLE IF NOT EXISTS orders (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      order_number TEXT NOT NULL UNIQUE,
+      owner_user_id INTEGER NOT NULL DEFAULT 1,
+      order_number TEXT NOT NULL,
       customer_id INTEGER,
       customer_name TEXT NOT NULL,
       customer_phone TEXT NOT NULL DEFAULT '',
@@ -134,12 +236,14 @@ export function initDatabase(): void {
       client_sync_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (owner_user_id, order_number),
       FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS sales (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      receipt_number TEXT NOT NULL UNIQUE,
+      owner_user_id INTEGER NOT NULL DEFAULT 1,
+      receipt_number TEXT NOT NULL,
       order_id INTEGER,
       customer_id INTEGER,
       customer_name TEXT NOT NULL,
@@ -157,6 +261,7 @@ export function initDatabase(): void {
       client_sync_id TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (owner_user_id, receipt_number),
       FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL,
       FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL
     );
@@ -173,6 +278,7 @@ export function initDatabase(): void {
 
     CREATE TABLE IF NOT EXISTS expenses (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      owner_user_id INTEGER NOT NULL DEFAULT 1,
       title TEXT NOT NULL,
       category TEXT NOT NULL,
       amount REAL NOT NULL DEFAULT 0,
@@ -195,15 +301,28 @@ function hasColumn(table: string, column: string): boolean {
   return cols.some((c) => c.name === column);
 }
 
+function getTableSql(table: string): string {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table) as { sql?: string } | undefined;
+  return row?.sql || '';
+}
+
 function ensureColumnMigrations(): void {
   const userCols: Array<[string, string]> = [
     ['auth_provider', "TEXT NOT NULL DEFAULT 'local'"],
     ['google_uid', 'TEXT'],
+    ['icloud_uid', 'TEXT'],
+    ['status', "TEXT NOT NULL DEFAULT 'active'"],
     ['security_question', "TEXT NOT NULL DEFAULT ''"],
     ['recovery_answer_hash', "TEXT NOT NULL DEFAULT ''"],
     ['recovery_answer_salt', "TEXT NOT NULL DEFAULT ''"],
     ['recovery_key_hash', "TEXT NOT NULL DEFAULT ''"],
     ['recovery_key_salt', "TEXT NOT NULL DEFAULT ''"],
+    ['subscription_plan', "TEXT NOT NULL DEFAULT 'legacy'"],
+    ['subscription_status', "TEXT NOT NULL DEFAULT 'active'"],
+    ['subscription_expires_at', 'TEXT'],
+    ['active_billing_id', 'INTEGER'],
   ];
   for (const [col, def] of userCols) {
     if (!hasColumn('users', col)) {
@@ -211,17 +330,181 @@ function ensureColumnMigrations(): void {
     }
   }
   db.exec('CREATE INDEX IF NOT EXISTS idx_users_google_uid ON users(google_uid) WHERE google_uid IS NOT NULL');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_users_icloud_uid ON users(icloud_uid) WHERE icloud_uid IS NOT NULL');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_login_events_created ON login_events(created_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_login_events_user ON login_events(user_id)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_system_audit_created ON system_audit_logs(created_at DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_notifications_target_created ON notifications(target_user_id, id DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_notifications_target_unread ON notifications(target_user_id, is_read)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_billing_user ON billing_subscriptions(user_id, id DESC)');
+  db.exec('CREATE INDEX IF NOT EXISTS idx_billing_status ON billing_subscriptions(status, created_at DESC)');
+  db.exec(
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_billing_provider_tx ON billing_subscriptions(payment_provider, LOWER(transaction_id)) WHERE transaction_id != ''"
+  );
 
-  if (!hasColumn('business_settings', 'inactivity_timeout_minutes')) {
-    db.exec('ALTER TABLE business_settings ADD COLUMN inactivity_timeout_minutes INTEGER NOT NULL DEFAULT 15');
+  // Migrate legacy single-tenant business_settings (id = 1 CHECK) to multi-owner
+  const settingsSql = getTableSql('business_settings');
+  if (!hasColumn('business_settings', 'owner_user_id') || settingsSql.includes('CHECK')) {
+    const hasInactivity = hasColumn('business_settings', 'inactivity_timeout_minutes');
+    db.exec(`
+      BEGIN TRANSACTION;
+      CREATE TABLE business_settings_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id INTEGER NOT NULL UNIQUE,
+        business_name TEXT NOT NULL,
+        tagline TEXT NOT NULL DEFAULT '',
+        logo_url TEXT NOT NULL DEFAULT '',
+        phone_primary TEXT NOT NULL DEFAULT '',
+        phone_secondary TEXT NOT NULL DEFAULT '',
+        email TEXT NOT NULL DEFAULT '',
+        location TEXT NOT NULL DEFAULT '',
+        currency TEXT NOT NULL DEFAULT 'UGX',
+        default_payment_method TEXT NOT NULL DEFAULT 'Mobile Money',
+        receipt_template TEXT NOT NULL DEFAULT 'executive',
+        receipt_thank_you TEXT NOT NULL DEFAULT 'Thank you for doing business with us! We appreciate your trust.',
+        receipt_prefix TEXT NOT NULL DEFAULT 'SBM',
+        next_receipt_seq INTEGER NOT NULL DEFAULT 1,
+        inactivity_timeout_minutes INTEGER NOT NULL DEFAULT 15,
+        profile_completed INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO business_settings_v2 (
+        id, owner_user_id, business_name, tagline, logo_url, phone_primary, phone_secondary,
+        email, location, currency, default_payment_method, receipt_template, receipt_thank_you,
+        receipt_prefix, next_receipt_seq, inactivity_timeout_minutes, profile_completed, updated_at
+      )
+      SELECT
+        id, 1, business_name, tagline, logo_url, phone_primary, phone_secondary,
+        email, location, currency, default_payment_method, receipt_template, receipt_thank_you,
+        receipt_prefix, next_receipt_seq, ${hasInactivity ? 'inactivity_timeout_minutes' : '15'}, 1, updated_at
+      FROM business_settings;
+      DROP TABLE business_settings;
+      ALTER TABLE business_settings_v2 RENAME TO business_settings;
+      COMMIT;
+    `);
+  } else {
+    if (!hasColumn('business_settings', 'inactivity_timeout_minutes')) {
+      db.exec('ALTER TABLE business_settings ADD COLUMN inactivity_timeout_minutes INTEGER NOT NULL DEFAULT 15');
+    }
+    if (!hasColumn('business_settings', 'profile_completed')) {
+      db.exec('ALTER TABLE business_settings ADD COLUMN profile_completed INTEGER NOT NULL DEFAULT 1');
+    }
   }
-  const syncTables = ['products', 'customers', 'orders', 'sales', 'expenses'];
-  for (const table of syncTables) {
+
+  // Ensure owner_user_id on simple tables
+  for (const table of ['products', 'customers', 'expenses']) {
+    if (!hasColumn(table, 'owner_user_id')) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN owner_user_id INTEGER NOT NULL DEFAULT 1`);
+    }
     if (!hasColumn(table, 'client_sync_id')) {
       db.exec(`ALTER TABLE ${table} ADD COLUMN client_sync_id TEXT`);
     }
-    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_client_sync_id ON ${table}(client_sync_id) WHERE client_sync_id IS NOT NULL`);
+    db.exec(`DROP INDEX IF EXISTS idx_${table}_client_sync_id`);
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_${table}_owner_sync_id ON ${table}(owner_user_id, client_sync_id) WHERE client_sync_id IS NOT NULL`
+    );
   }
+
+  // Rebuild legacy orders if missing owner_user_id or still has global UNIQUE(order_number)
+  if (!hasColumn('orders', 'owner_user_id')) {
+    const hasSync = hasColumn('orders', 'client_sync_id');
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      BEGIN TRANSACTION;
+      CREATE TABLE orders_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id INTEGER NOT NULL DEFAULT 1,
+        order_number TEXT NOT NULL,
+        customer_id INTEGER,
+        customer_name TEXT NOT NULL,
+        customer_phone TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL,
+        items_summary TEXT NOT NULL DEFAULT '',
+        quantity INTEGER NOT NULL DEFAULT 1,
+        total_amount REAL NOT NULL DEFAULT 0,
+        deposit_paid REAL NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'New Order',
+        deadline TEXT NOT NULL DEFAULT '',
+        delivery_details TEXT NOT NULL DEFAULT '',
+        instructions TEXT NOT NULL DEFAULT '',
+        client_sync_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (owner_user_id, order_number),
+        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL
+      );
+      INSERT INTO orders_v2 (
+        id, owner_user_id, order_number, customer_id, customer_name, customer_phone, title,
+        items_summary, quantity, total_amount, deposit_paid, status, deadline,
+        delivery_details, instructions, client_sync_id, created_at, updated_at
+      )
+      SELECT
+        id, 1, order_number, customer_id, customer_name, customer_phone, title,
+        items_summary, quantity, total_amount, deposit_paid, status, deadline,
+        delivery_details, instructions, ${hasSync ? 'client_sync_id' : 'NULL'}, created_at, updated_at
+      FROM orders;
+      DROP TABLE orders;
+      ALTER TABLE orders_v2 RENAME TO orders;
+      COMMIT;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
+  db.exec('DROP INDEX IF EXISTS idx_orders_client_sync_id');
+  db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_owner_sync_id ON orders(owner_user_id, client_sync_id) WHERE client_sync_id IS NOT NULL'
+  );
+
+  // Rebuild legacy sales if missing owner_user_id or still has global UNIQUE(receipt_number)
+  if (!hasColumn('sales', 'owner_user_id')) {
+    const hasSync = hasColumn('sales', 'client_sync_id');
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      BEGIN TRANSACTION;
+      CREATE TABLE sales_v2 (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_user_id INTEGER NOT NULL DEFAULT 1,
+        receipt_number TEXT NOT NULL,
+        order_id INTEGER,
+        customer_id INTEGER,
+        customer_name TEXT NOT NULL,
+        customer_phone TEXT NOT NULL DEFAULT '',
+        items_json TEXT NOT NULL,
+        subtotal REAL NOT NULL DEFAULT 0,
+        discount REAL NOT NULL DEFAULT 0,
+        total_amount REAL NOT NULL DEFAULT 0,
+        amount_paid REAL NOT NULL DEFAULT 0,
+        balance_due REAL NOT NULL DEFAULT 0,
+        payment_method TEXT NOT NULL DEFAULT 'Cash',
+        payment_status TEXT NOT NULL DEFAULT 'Paid',
+        notes TEXT NOT NULL DEFAULT '',
+        sale_date TEXT NOT NULL,
+        client_sync_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE (owner_user_id, receipt_number),
+        FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL,
+        FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE SET NULL
+      );
+      INSERT INTO sales_v2 (
+        id, owner_user_id, receipt_number, order_id, customer_id, customer_name, customer_phone,
+        items_json, subtotal, discount, total_amount, amount_paid, balance_due,
+        payment_method, payment_status, notes, sale_date, client_sync_id, created_at, updated_at
+      )
+      SELECT
+        id, 1, receipt_number, order_id, customer_id, customer_name, customer_phone,
+        items_json, subtotal, discount, total_amount, amount_paid, balance_due,
+        payment_method, payment_status, notes, sale_date, ${hasSync ? 'client_sync_id' : 'NULL'}, created_at, updated_at
+      FROM sales;
+      DROP TABLE sales;
+      ALTER TABLE sales_v2 RENAME TO sales;
+      COMMIT;
+    `);
+    db.pragma('foreign_keys = ON');
+  }
+  db.exec('DROP INDEX IF EXISTS idx_sales_client_sync_id');
+  db.exec(
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_owner_sync_id ON sales(owner_user_id, client_sync_id) WHERE client_sync_id IS NOT NULL'
+  );
 }
 
 function backfillSyncIds(): void {
@@ -232,6 +515,63 @@ function backfillSyncIds(): void {
     UPDATE sales SET client_sync_id = REPLACE(receipt_number, ' ', '_') WHERE client_sync_id IS NULL OR client_sync_id = '';
     UPDATE expenses SET client_sync_id = 'exp_' || id WHERE client_sync_id IS NULL OR client_sync_id = '';
   `);
+}
+
+export function ensureWorkspaceForUser(
+  userId: number,
+  profile?: {
+    business_name?: string;
+    tagline?: string;
+    phone_primary?: string;
+    email?: string;
+    location?: string;
+    currency?: string;
+    receipt_prefix?: string;
+    full_name?: string;
+    profile_completed?: number;
+  }
+): any {
+  const existing = db
+    .prepare('SELECT * FROM business_settings WHERE owner_user_id = ?')
+    .get(userId);
+  if (existing) return existing;
+
+  const cleanBizName = String(profile?.business_name || '').trim();
+  const fallbackName = profile?.full_name
+    ? `${String(profile.full_name).trim().split(/\s+/)[0]}'s Business`
+    : 'My Business Studio';
+  const businessName = cleanBizName || fallbackName;
+  const prefix =
+    String(profile?.receipt_prefix || '').trim().toUpperCase().slice(0, 8) ||
+    suggestReceiptPrefix(businessName);
+  const completed =
+    profile?.profile_completed !== undefined
+      ? profile.profile_completed
+      : cleanBizName.length >= 2
+      ? 1
+      : 0;
+
+  db.prepare(`
+    INSERT INTO business_settings (
+      owner_user_id, business_name, tagline, logo_url, phone_primary, phone_secondary,
+      email, location, currency, default_payment_method, receipt_template,
+      receipt_thank_you, receipt_prefix, next_receipt_seq, inactivity_timeout_minutes, profile_completed
+    ) VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, 'Mobile Money', 'executive', ?, ?, 1, 15, ?)
+  `).run(
+    userId,
+    businessName,
+    String(profile?.tagline || 'Sales, Services & Operations').trim(),
+    DEFAULT_LOGO_URL,
+    String(profile?.phone_primary || '').trim(),
+    String(profile?.email || '').trim(),
+    String(profile?.location || '').trim(),
+    String(profile?.currency || 'UGX').trim() || 'UGX',
+    `Thank you for doing business with ${businessName}! We appreciate your trust.`,
+    prefix,
+    completed
+  );
+
+  return db.prepare('SELECT * FROM business_settings WHERE owner_user_id = ?').get(userId);
 }
 
 function daysAgoIso(days: number): string {
@@ -272,15 +612,23 @@ function seedInitialData(): void {
     `).run('admin', 'Stanley Mpanga', 'mpangastanley04@gmail.com', 'Administrator', hash, salt);
   }
 
-  const settingsCount = db.prepare('SELECT COUNT(*) AS count FROM business_settings').get() as { count: number };
+  const adminUser = db
+    .prepare("SELECT id FROM users WHERE role = 'Administrator' ORDER BY id ASC LIMIT 1")
+    .get() as { id: number } | undefined;
+  const adminId = adminUser?.id || 1;
+
+  const settingsCount = db
+    .prepare('SELECT COUNT(*) AS count FROM business_settings WHERE owner_user_id = ?')
+    .get(adminId) as { count: number };
   if (settingsCount.count === 0) {
     db.prepare(`
       INSERT INTO business_settings (
-        id, business_name, tagline, logo_url, phone_primary, phone_secondary, email,
+        owner_user_id, business_name, tagline, logo_url, phone_primary, phone_secondary, email,
         location, currency, default_payment_method, receipt_template, receipt_thank_you,
-        receipt_prefix, next_receipt_seq
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        receipt_prefix, next_receipt_seq, profile_completed
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
     `).run(
+      adminId,
       'Stanley Print & Branding Studio',
       'Printing, Graphics, Branding & Advertising Solutions',
       DEFAULT_LOGO_URL,
@@ -301,8 +649,8 @@ function seedInitialData(): void {
   if (productCount.count > 0) return;
 
   const insertProduct = db.prepare(`
-    INSERT INTO products (name, category, description, unit_price, production_cost, unit_label)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO products (owner_user_id, name, category, description, unit_price, production_cost, unit_label)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
 
   const seedProducts: Array<[string, string, string, number, number, string]> = [
@@ -320,13 +668,13 @@ function seedInitialData(): void {
 
   const productIds: number[] = [];
   for (const p of seedProducts) {
-    const info = insertProduct.run(...p);
+    const info = insertProduct.run(adminId, ...p);
     productIds.push(Number(info.lastInsertRowid));
   }
 
   const insertCustomer = db.prepare(`
-    INSERT INTO customers (name, phone, email, location, notes)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO customers (owner_user_id, name, phone, email, location, notes)
+    VALUES (?, ?, ?, ?, ?, ?)
   `);
 
   const seedCustomers: Array<[string, string, string, string, string]> = [
@@ -339,100 +687,30 @@ function seedInitialData(): void {
 
   const customerIds: number[] = [];
   for (const c of seedCustomers) {
-    const info = insertCustomer.run(...c);
+    const info = insertCustomer.run(adminId, ...c);
     customerIds.push(Number(info.lastInsertRowid));
   }
 
   const insertOrder = db.prepare(`
     INSERT INTO orders (
-      order_number, customer_id, customer_name, customer_phone, title,
+      owner_user_id, order_number, customer_id, customer_name, customer_phone, title,
       items_summary, quantity, total_amount, deposit_paid, status,
       deadline, delivery_details, instructions
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
-  insertOrder.run(
-    'ORD-1001',
-    customerIds[0],
-    'Kigozi Hardware & Suppliers',
-    '+256 774 320 811',
-    'Storefront Promo Banners & Cards',
-    'Promotional PVC Banner (6x3 ft) x2, Matte Laminated Business Cards x3',
-    5,
-    285000,
-    285000,
-    'Completed',
-    daysAgoIso(5),
-    'Collected at Nasser Road workshop',
-    'Use deep blue background with bold yellow phone numbers.'
-  );
-  insertOrder.run(
-    'ORD-1002',
-    customerIds[1],
-    'Pearl Roasters Coffee Co.',
-    '+256 701 892 440',
-    '250g Roast Bag Die-Cut Labels',
-    'Custom Die-Cut Vinyl Stickers (100 pcs) x4',
-    4,
-    260000,
-    150000,
-    'In Production',
-    daysFromNowIso(2),
-    'Boda delivery to Acacia Avenue, Kololo',
-    'Matte laminate finish, 6cm circular die-cut.'
-  );
-  insertOrder.run(
-    'ORD-1003',
-    customerIds[2],
-    'Grace Namukasa Events',
-    '+256 782 519 004',
-    'Corporate Gala Roll-Up & Flyers',
-    'Roll-Up Stand Banner x2, A5 Promotional Flyers (500 pcs) x1',
-    3,
-    530000,
-    250000,
-    'Ready for Collection',
-    daysFromNowIso(1),
-    'Client driver picking up at 4:00 PM',
-    'Include gold border framing on both roll-up stands.'
-  );
-  insertOrder.run(
-    'ORD-1004',
-    customerIds[3],
-    'Makerere Tech Hub',
-    '+256 756 209 117',
-    'Annual Hackathon Tear Drop Flags',
-    'Tear Drop Flag Banner (3.4m Complete) x3',
-    3,
-    840000,
-    0,
-    'Awaiting Deposit',
-    daysFromNowIso(5),
-    'Deliver to Innovation Village Gate B',
-    'Double-sided print, cross bases required for indoor/outdoor.'
-  );
-  insertOrder.run(
-    'ORD-1005',
-    customerIds[4],
-    'Ssemakula Pharmacy Ltd',
-    '+256 779 640 233',
-    'Staff Branded Polo Uniforms',
-    'Branded Polo T-Shirts (Heat Press) x12',
-    12,
-    420000,
-    200000,
-    'New Order',
-    daysFromNowIso(4),
-    'Deliver to Wandegeya Main Branch',
-    'Sizes: 4 Medium, 5 Large, 3 XL in navy blue.'
-  );
+  insertOrder.run(adminId, 'ORD-1001', customerIds[0], 'Kigozi Hardware & Suppliers', '+256 774 320 811', 'Storefront Promo Banners & Cards', 'Promotional PVC Banner (6x3 ft) x2, Matte Laminated Business Cards x3', 5, 285000, 285000, 'Completed', daysAgoIso(5), 'Collected at Nasser Road workshop', 'Use deep blue background with bold yellow phone numbers.');
+  insertOrder.run(adminId, 'ORD-1002', customerIds[1], 'Pearl Roasters Coffee Co.', '+256 701 892 440', '250g Roast Bag Die-Cut Labels', 'Custom Die-Cut Vinyl Stickers (100 pcs) x4', 4, 260000, 150000, 'In Production', daysFromNowIso(2), 'Boda delivery to Acacia Avenue, Kololo', 'Matte laminate finish, 6cm circular die-cut.');
+  insertOrder.run(adminId, 'ORD-1003', customerIds[2], 'Grace Namukasa Events', '+256 782 519 004', 'Corporate Gala Roll-Up & Flyers', 'Roll-Up Stand Banner x2, A5 Promotional Flyers (500 pcs) x1', 3, 530000, 250000, 'Ready for Collection', daysFromNowIso(1), 'Client driver picking up at 4:00 PM', 'Include gold border framing on both roll-up stands.');
+  insertOrder.run(adminId, 'ORD-1004', customerIds[3], 'Makerere Tech Hub', '+256 756 209 117', 'Annual Hackathon Tear Drop Flags', 'Tear Drop Flag Banner (3.4m Complete) x3', 3, 840000, 0, 'Awaiting Deposit', daysFromNowIso(5), 'Deliver to Innovation Village Gate B', 'Double-sided print, cross bases required for indoor/outdoor.');
+  insertOrder.run(adminId, 'ORD-1005', customerIds[4], 'Ssemakula Pharmacy Ltd', '+256 779 640 233', 'Staff Branded Polo Uniforms', 'Branded Polo T-Shirts (Heat Press) x12', 12, 420000, 200000, 'New Order', daysFromNowIso(4), 'Deliver to Wandegeya Main Branch', 'Sizes: 4 Medium, 5 Large, 3 XL in navy blue.');
 
   const insertSale = db.prepare(`
     INSERT INTO sales (
-      receipt_number, order_id, customer_id, customer_name, customer_phone,
+      owner_user_id, receipt_number, order_id, customer_id, customer_name, customer_phone,
       items_json, subtotal, discount, total_amount, amount_paid, balance_due,
       payment_method, payment_status, notes, sale_date
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const insertSalePayment = db.prepare(`
     INSERT INTO sale_payments (sale_id, amount, payment_method, note, paid_at)
@@ -567,6 +845,7 @@ function seedInitialData(): void {
     const balance = Math.max(0, total - s.paid);
     const status = balance === 0 ? 'Paid' : s.paid > 0 ? 'Partially Paid' : 'Unpaid';
     const info = insertSale.run(
+      adminId,
       s.receipt,
       null,
       customerIds[s.custIdx],
@@ -589,8 +868,8 @@ function seedInitialData(): void {
   }
 
   const insertExpense = db.prepare(`
-    INSERT INTO expenses (title, category, amount, payment_method, vendor, notes, expense_date)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO expenses (owner_user_id, title, category, amount, payment_method, vendor, notes, expense_date)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const seedExpenses: Array<[string, string, number, string, string, string, string]> = [
@@ -607,6 +886,6 @@ function seedInitialData(): void {
   ];
 
   for (const e of seedExpenses) {
-    insertExpense.run(...e);
+    insertExpense.run(adminId, ...e);
   }
 }

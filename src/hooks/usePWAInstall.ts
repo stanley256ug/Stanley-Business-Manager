@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 interface BeforeInstallPromptEvent extends Event {
   prompt: () => Promise<void>;
@@ -69,15 +69,6 @@ export function usePWAInstall() {
     }
   }, []);
 
-  const downloadLink = useMemo(() => {
-    if (typeof window === 'undefined') return '/?install=1';
-    const origin = window.location.origin;
-    if (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
-      return `${origin}/?install=1`;
-    }
-    return `${origin}/?install=1`;
-  }, []);
-
   const install = async (): Promise<boolean> => {
     if (!deferredPrompt) return false;
     await deferredPrompt.prompt();
@@ -96,7 +87,6 @@ export function usePWAInstall() {
     isIOS,
     isInIframe,
     hasInstallParam,
-    downloadLink,
     clearInstallParam,
     install,
   };
